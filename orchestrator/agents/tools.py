@@ -57,9 +57,16 @@ def _http_get_impl(url: str, params_json: Optional[str] = None, headers_json: Op
         params = _parse_json_arg(params_json)
         headers = _parse_json_arg(headers_json)
         resp = httpx.get(url, params=params, headers=headers, timeout=5.0)
+
+        # OPTIMIZATION: Only return important headers to save tokens
+        important_headers = {}
+        for key in ["content-type", "set-cookie", "location", "www-authenticate"]:
+            if key in resp.headers:
+                important_headers[key] = resp.headers[key][:100]  # Truncate header values
+
         return {
             "status_code": resp.status_code,
-            "headers": dict(resp.headers),
+            "headers": important_headers,
             "body": _truncate(resp.text),
         }
     except Exception as exc:
@@ -87,9 +94,16 @@ def _http_post_impl(
             files=files,
             timeout=5.0,
         )
+
+        # OPTIMIZATION: Only return important headers to save tokens
+        important_headers = {}
+        for key in ["content-type", "set-cookie", "location", "www-authenticate"]:
+            if key in resp.headers:
+                important_headers[key] = resp.headers[key][:100]  # Truncate header values
+
         return {
             "status_code": resp.status_code,
-            "headers": dict(resp.headers),
+            "headers": important_headers,
             "body": _truncate(resp.text),
         }
     except Exception as exc:
@@ -122,28 +136,61 @@ def http_response_to_string(response: Dict[str, Any]) -> str:
     return json.dumps(response, indent=2)
 
 
-def _get_recent_logs_impl(since_timestamp: Optional[str] = None) -> Dict[str, Any]:
-    """Fetch recent request logs from the sample app."""
+def _get_recent_logs_impl(since_timestamp: Optional[str] = None, limit: int = 10) -> Dict[str, Any]:
+    """Fetch recent request logs from the sample app. OPTIMIZED: Returns only last 10 logs by default."""
     try:
         resp = httpx.get(
             f"{TARGET_URL}/internal/logs",
             params={"since": since_timestamp} if since_timestamp else None,
             timeout=5.0,
         )
-        return resp.json()
+        data = resp.json()
+        logs = data.get("logs", [])
+
+        # OPTIMIZATION: Limit to last N logs to save tokens
+        if len(logs) > limit:
+            logs = logs[-limit:]
+
+        # OPTIMIZATION: Truncate each log entry
+        for log in logs:
+            if "path" in log and isinstance(log["path"], str):
+                log["path"] = log["path"][:100]
+            if "body" in log and isinstance(log["body"], str):
+                log["body"] = _truncate(log["body"], 50)
+            if "response" in log and isinstance(log["response"], str):
+                log["response"] = _truncate(log["response"], 50)
+
+        return {"logs": logs, "total": len(logs), "truncated": len(data.get("logs", [])) > limit}
     except Exception as exc:
         return {"logs": [], "error": str(exc)}
 
 
-def _get_source_file_impl(filename: str) -> Dict[str, Any]:
-    """Fetch a source file from the sample app."""
+def _get_source_file_impl(filename: str, max_lines: int = 100) -> Dict[str, Any]:
+    """Fetch a source file from the sample app. OPTIMIZED: Returns max 100 lines by default."""
     try:
         resp = httpx.get(
             f"{TARGET_URL}/internal/source",
             params={"filename": filename},
             timeout=5.0,
         )
-        return resp.json()
+        data = resp.json()
+        content = data.get("content", "")
+
+        # OPTIMIZATION: Truncate large files to save massive tokens
+        lines = content.split("\n")
+        if len(lines) > max_lines:
+            # Keep first 80% and last 20% for context
+            keep_start = int(max_lines * 0.8)
+            keep_end = max_lines - keep_start
+            lines = lines[:keep_start] + [f"\n... {len(lines) - max_lines} lines omitted ...\n"] + lines[-keep_end:]
+            content = "\n".join(lines)
+
+        return {
+            "filename": filename,
+            "content": content,
+            "total_lines": len(data.get("content", "").split("\n")),
+            "truncated": len(data.get("content", "").split("\n")) > max_lines
+        }
     except Exception as exc:
         return {"filename": filename, "content": "", "error": str(exc)}
 
@@ -315,12 +362,12 @@ def run_comprehensive_recon(
             # Analyze response
             analysis = _analyze_response(url, status_code, headers, body)
 
+            # OPTIMIZATION: Compress finding to save tokens
             finding = {
                 "endpoint": path,
                 "status_code": status_code,
-                "response_preview": _truncate(body, limit=200),
-                "indicators": analysis["indicators"],
-                "notes": analysis["notes"]
+                "preview": _truncate(body, limit=50),  # Reduced from 200 to 50
+                "notes": analysis["notes"][:100] if analysis["notes"] else None  # Truncate notes
             }
 
             findings.append(finding)
@@ -422,15 +469,24 @@ def query_recon_data(
                 r["indicators"].get("has_sensitive_data"))
         ]
 
-    # Summarize results
+    # OPTIMIZATION: Compress results to save tokens
+    # Remove large response_preview from results
+    compressed = []
+    for r in results[:10]:  # Limit to 10 instead of 20
+        compressed.append({
+            "endpoint": r["endpoint"],
+            "status": r["status_code"],
+            "notes": r.get("notes", "")[:100]  # Truncate notes
+        })
+
     summary = {
         "total_results": len(results),
-        "endpoints": [r["endpoint"] for r in results],
-        "results": results[:20]  # Limit to 20 to avoid context overflow
+        "endpoints": [r["endpoint"] for r in results][:15],  # Max 15 endpoints
+        "results": compressed
     }
 
-    if len(results) > 20:
-        summary["note"] = f"Showing first 20 of {len(results)} results. Use more specific filters."
+    if len(results) > 10:
+        summary["note"] = f"Showing 10 of {len(results)}. Use specific filters."
 
     return summary
 
