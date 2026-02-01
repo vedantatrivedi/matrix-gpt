@@ -1,0 +1,609 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MatrixGPT</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+      :root {
+        --bg: #0a0e14;
+        --panel: #0a0e14;
+        --border: #1e293b;
+        --red: #ef4444;
+        --cyan: #06b6d4;
+        --green: #22c55e;
+        --text: #e2e8f0;
+      }
+      * { font-family: 'JetBrains Mono', monospace; }
+      body { background: var(--bg); color: var(--text); }
+      .panel { border: 1px solid var(--border); background: var(--panel); }
+      .panel-title { letter-spacing: 0.08em; }
+      .glow-red { animation: redPulse 2s infinite; }
+      .glow-cyan { animation: cyanPulse 2s infinite; }
+      @keyframes redPulse { 0%,100% { box-shadow: 0 0 0 0 rgba(239,68,68,0.0);} 50% { box-shadow: 0 0 12px 2px rgba(239,68,68,0.4);} }
+      @keyframes cyanPulse { 0%,100% { box-shadow: 0 0 0 0 rgba(6,182,212,0.0);} 50% { box-shadow: 0 0 12px 2px rgba(6,182,212,0.4);} }
+      .event-entry { animation: slideIn 0.2s ease-out; }
+      @keyframes slideIn { from { transform: translateY(12px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+      .btn { border: 1px solid var(--border); padding: 10px 14px; text-transform: uppercase; letter-spacing: 0.1em; }
+      .btn-red { color: var(--red); }
+      .btn-cyan { color: var(--cyan); }
+      .btn-green { color: var(--green); }
+      .tag { border: 1px solid var(--border); padding: 2px 6px; font-size: 10px; letter-spacing: 0.08em; }
+    </style>
+  </head>
+  <body class="min-h-screen">
+    <div id="root"></div>
+    <script type="module">
+      import React, { useEffect, useMemo, useRef, useState } from 'https://esm.sh/react@18';
+      import { createRoot } from 'https://esm.sh/react-dom@18/client';
+      const h = React.createElement;
+
+      const WS_URL = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
+
+      function useCountUp(value, duration = 300) {
+        const [display, setDisplay] = useState(value);
+        useEffect(() => {
+          const start = performance.now();
+          const from = display;
+          const to = value;
+          let raf;
+          const tick = (t) => {
+            const progress = Math.min((t - start) / duration, 1);
+            const next = Math.floor(from + (to - from) * progress);
+            setDisplay(next);
+            if (progress < 1) raf = requestAnimationFrame(tick);
+          };
+          raf = requestAnimationFrame(tick);
+          return () => cancelAnimationFrame(raf);
+        }, [value]);
+        return display;
+      }
+
+      function App() {
+        const [phase, setPhase] = useState('pre');
+        const [target, setTarget] = useState('sample');
+        const [battleId, setBattleId] = useState(null);
+        const [redScore, setRedScore] = useState(0);
+        const [blueScore, setBlueScore] = useState(0);
+        const [events, setEvents] = useState([]);
+        const [redLog, setRedLog] = useState([]);
+        const [blueLog, setBlueLog] = useState([]);
+        const [battleFeed, setBattleFeed] = useState([]);
+        const [redView, setRedView] = useState('strategy');
+        const [blueView, setBlueView] = useState('strategy');
+        const [vulns, setVulns] = useState([]);
+        const [timer, setTimer] = useState(0);
+        const [lastRedEventAt, setLastRedEventAt] = useState(0);
+        const [lastBlueEventAt, setLastBlueEventAt] = useState(0);
+        const [wsStatus, setWsStatus] = useState('connecting');
+        const [battles, setBattles] = useState([]);
+        const [loadingStatus, setLoadingStatus] = useState(true);
+        const [activeBattle, setActiveBattle] = useState(null);
+        const wsRef = useRef(null);
+
+        const redScoreDisplay = useCountUp(redScore);
+        const blueScoreDisplay = useCountUp(blueScore);
+
+        useEffect(() => {
+          if (phase !== 'battle') return;
+          const interval = setInterval(() => setTimer((t) => t + 1), 1000);
+          return () => clearInterval(interval);
+        }, [phase]);
+
+        useEffect(() => {
+          const ws = new WebSocket(WS_URL);
+          wsRef.current = ws;
+          ws.onopen = () => setWsStatus('connected');
+          ws.onclose = () => setWsStatus('disconnected');
+          ws.onmessage = (msg) => {
+            const evt = JSON.parse(msg.data);
+            setEvents((prev) => [...prev, evt]);
+            if (evt.team === 'red') setLastRedEventAt(Date.now());
+            if (evt.team === 'blue') setLastBlueEventAt(Date.now());
+
+            if (evt.type === 'score_update') {
+              setRedScore(evt.data.red_score || 0);
+              setBlueScore(evt.data.blue_score || 0);
+            }
+
+            if (evt.team === 'red') {
+              setRedLog((prev) => [...prev, evt].slice(-200));
+            } else if (evt.team === 'blue') {
+              setBlueLog((prev) => [...prev, evt].slice(-200));
+            }
+            if (evt.type === 'battle_event' || evt.type === 'patch_applied' || evt.type === 'attack_detected') {
+              setBattleFeed((prev) => [...prev, evt].slice(-300));
+            }
+          };
+          return () => ws.close();
+        }, []);
+
+        useEffect(() => {
+          const loadStatus = async () => {
+            setLoadingStatus(true);
+            const res = await fetch('/api/battle/status');
+            const data = await res.json();
+            if (data.status === 'running') {
+              setPhase('battle');
+              setBattleId(data.battle?.id);
+              setActiveBattle(data.battle);
+              setVulns(data.vulnerabilities || []);
+              const ev = await fetch(`/api/battle/events?battle_id=${data.battle?.id}`);
+              const evData = await ev.json();
+              const past = (evData.events || []).map((e) => ({
+                type: e.event_type,
+                team: e.team,
+                agent: e.agent_name,
+                timestamp: e.timestamp,
+                data: e.details || { description: e.description },
+              }));
+              const feed = past.filter((e) =>
+                e.type === 'battle_event' || e.type === 'patch_applied' || e.type === 'attack_detected'
+              );
+              setEvents(past);
+              setRedLog(past.filter((e) => e.team === 'red'));
+              setBlueLog(past.filter((e) => e.team === 'blue'));
+              setBattleFeed(feed);
+            } else {
+              setActiveBattle(null);
+            }
+            setLoadingStatus(false);
+          };
+          loadStatus();
+          const interval = setInterval(loadStatus, 5000);
+          return () => clearInterval(interval);
+        }, [battleId]);
+
+        useEffect(() => {
+          const loadBattles = async () => {
+            const res = await fetch('/api/battles');
+            const data = await res.json();
+            setBattles(data.battles || []);
+          };
+          loadBattles();
+          const interval = setInterval(loadBattles, 7000);
+          return () => clearInterval(interval);
+        }, []);
+
+        const startBattle = async () => {
+          const res = await fetch('/api/battle/start', { method: 'POST' });
+          const data = await res.json();
+          setBattleId(data.battle_id);
+          setActiveBattle({ id: data.battle_id });
+          setVulns(data.vulnerabilities || []);
+          setPhase('battle');
+          setTimer(0);
+          setEvents([]);
+          setBattleFeed([]);
+          setRedLog([]);
+          setBlueLog([]);
+        };
+        const startMockBattle = async () => {
+          const res = await fetch('/api/battle/start?mode=mock', { method: 'POST' });
+          const data = await res.json();
+          setBattleId(data.battle_id);
+          setActiveBattle({ id: data.battle_id });
+          setVulns(data.vulnerabilities || []);
+          setPhase('battle');
+          setTimer(0);
+          setEvents([]);
+          setBattleFeed([]);
+          setRedLog([]);
+          setBlueLog([]);
+        };
+
+        const stopBattle = async () => {
+          await fetch('/api/battle/stop', { method: 'POST' });
+          setActiveBattle(null);
+          setPhase('post');
+        };
+
+        const stopAndReturn = async () => {
+          await fetch('/api/battle/stop', { method: 'POST' });
+          setActiveBattle(null);
+          setPhase('pre');
+        };
+
+        const forceStopBattle = async (id) => {
+          await fetch(`/api/battle/force-stop?battle_id=${id}`, { method: 'POST' });
+          const res = await fetch('/api/battles');
+          const data = await res.json();
+          setBattles(data.battles || []);
+        };
+
+        const resumeBattle = async (id) => {
+          const res = await fetch(`/api/battle/events?battle_id=${id}`);
+          const data = await res.json();
+          const past = (data.events || []).map((e) => ({
+            type: e.event_type,
+            team: e.team,
+            agent: e.agent_name,
+            timestamp: e.timestamp,
+            data: e.details || { description: e.description },
+          }));
+          setBattleId(id);
+          setPhase('battle');
+          setActiveBattle({ id });
+          const feed = past.filter((e) =>
+            e.type === 'battle_event' || e.type === 'patch_applied' || e.type === 'attack_detected'
+          );
+          setEvents(past);
+          setRedLog(past.filter((e) => e.team === 'red'));
+          setBlueLog(past.filter((e) => e.team === 'blue'));
+          setBattleFeed(feed);
+        };
+
+        const fmtTime = (secs) => {
+          const m = String(Math.floor(secs / 60)).padStart(2, '0');
+          const s = String(secs % 60).padStart(2, '0');
+          return `${m}:${s}`;
+        };
+
+        const redActive = Date.now() - lastRedEventAt < 4000;
+        const blueActive = Date.now() - lastBlueEventAt < 4000;
+        const strategyTypes = new Set([
+          'agent_thinking',
+          'battle_event',
+          'attack_detected',
+          'patch_applied',
+          'battle_start',
+          'battle_end',
+          'score_update',
+        ]);
+
+        const filterLog = (log, view) => {
+          if (view === 'details') {
+            return log.filter((e) => e.type === 'tool_call' || e.type === 'tool_result');
+          }
+          return log.filter((e) => strategyTypes.has(e.type));
+        };
+
+        const renderLogText = (e) => {
+          if (e.type === 'tool_call') {
+            return `→ ${e.data?.tool || 'tool'} ${JSON.stringify(e.data?.args || {})}`;
+          }
+          if (e.type === 'tool_result') {
+            return `← ${e.data?.output || ''}`;
+          }
+          return e.data?.text || e.data?.description || e.type;
+        };
+
+        if (phase === 'pre') {
+          return h(
+            'div',
+            { className: 'min-h-screen flex items-center justify-center p-8' },
+            h(
+              'div',
+              { className: 'w-full max-w-5xl panel p-8' },
+              h('div', { className: 'text-3xl font-bold tracking-[0.2em]' }, 'MATRIXGPT'),
+              h('div', { className: 'text-xs mt-2 text-slate-400' }, 'AUTONOMOUS ADVERSARIAL SECURITY WAR GAME'),
+              h(
+                'div',
+                { className: 'text-xs text-slate-400 mt-2' },
+                `WebSocket: ${wsStatus}`
+              ),
+              h(
+                'div',
+                { className: 'grid grid-cols-1 md:grid-cols-2 gap-6 mt-10' },
+                h(
+                  'div',
+                  { className: `panel p-6 ${target === 'sample' ? 'border-cyan-500' : ''}` },
+                  h('div', { className: 'text-lg' }, 'Use Sample App'),
+                  h('div', { className: 'text-xs text-slate-400 mt-2' }, 'Built-in vulnerable target application'),
+                  h(
+                    'button',
+                    { className: 'btn btn-cyan mt-6', onClick: () => setTarget('sample') },
+                    'Select'
+                  )
+                ),
+                h(
+                  'div',
+                  { className: `panel p-6 ${target === 'upload' ? 'border-red-500' : ''}` },
+                  h('div', { className: 'text-lg' }, 'Upload Your Codebase'),
+                  h('div', { className: 'text-xs text-slate-400 mt-2' }, 'Upload coming soon (hackathon demo)'),
+                  h(
+                    'button',
+                    { className: 'btn btn-red mt-6', onClick: () => setTarget('upload') },
+                    'Select'
+                  )
+                )
+              ),
+              h(
+                'div',
+                { className: 'mt-10 flex items-center gap-4 flex-wrap' },
+                h('button', { className: 'btn btn-green', onClick: startBattle }, 'Start Battle'),
+                h('button', { className: 'btn btn-cyan', onClick: startMockBattle }, 'Mock Demo'),
+                activeBattle
+                  ? h(
+                      'button',
+                      { className: 'btn btn-red', onClick: () => resumeBattle(activeBattle.id) },
+                      'Return to Battle'
+                    )
+                  : null,
+                h(
+                  'div',
+                  { className: 'text-xs text-slate-400' },
+                  'Red Team attacks. Blue Team defends. Watch in real time.'
+                )
+              ),
+              h(
+                'div',
+                { className: 'panel p-4 mt-6' },
+                h('div', { className: 'text-xs mb-2' }, 'BATTLE HISTORY'),
+                h(
+                  'div',
+                  { className: 'text-xs text-slate-400' },
+                  battles.length ? '' : 'No battles yet.'
+                ),
+                h(
+                  'div',
+                  { className: 'mt-2 grid grid-cols-1 gap-2' },
+                  ...battles.map((b) =>
+                    h(
+                      'div',
+                      { key: b.id, className: 'panel p-2 text-[11px] flex items-center justify-between' },
+                      h('div', null, `${b.id} — ${b.status} — ${b.started_at}`),
+                      h(
+                        'div',
+                        { className: 'flex gap-2' },
+                        h(
+                          'button',
+                          { className: 'btn btn-cyan', onClick: () => resumeBattle(b.id) },
+                          'View'
+                        ),
+                        b.status === 'running'
+                          ? h(
+                              'button',
+                              { className: 'btn btn-red', onClick: () => forceStopBattle(b.id) },
+                              'Force Stop'
+                            )
+                          : null
+                      )
+                    )
+                  )
+                )
+              )
+            )
+          );
+        }
+
+        if (phase === 'post') {
+          return h(
+            'div',
+            { className: 'min-h-screen p-8' },
+            h(
+              'div',
+              { className: 'panel p-6' },
+              h('div', { className: 'text-2xl tracking-[0.2em]' }, 'BATTLE REPORT'),
+              h(
+                'div',
+                { className: 'mt-6 grid grid-cols-1 md:grid-cols-2 gap-6' },
+                h(
+                  'div',
+                  { className: 'panel p-4' },
+                  h('div', { className: 'text-xs' }, 'FINAL SCORE'),
+                  h(
+                    'div',
+                    { className: 'text-3xl mt-2' },
+                    h('span', { style: { color: 'var(--red)' } }, `RED ${redScoreDisplay}`),
+                    ' / ',
+                    h('span', { style: { color: 'var(--cyan)' } }, `BLUE ${blueScoreDisplay}`)
+                  )
+                ),
+                h(
+                  'div',
+                  { className: 'panel p-4' },
+                  h('div', { className: 'text-xs' }, 'SUMMARY STATS'),
+                  h(
+                    'div',
+                    { className: 'text-xs text-slate-400 mt-2' },
+                    `Attacks: ${events.filter((e) => e.team === 'red').length}`
+                  ),
+                  h(
+                    'div',
+                    { className: 'text-xs text-slate-400' },
+                    `Patches: ${events.filter((e) => e.type === 'patch_applied').length}`
+                  ),
+                  h('div', { className: 'text-xs text-slate-400' }, `Duration: ${fmtTime(timer)}`)
+                )
+              ),
+              h(
+                'div',
+                { className: 'panel p-4 mt-6' },
+                h('div', { className: 'text-xs mb-2' }, 'TIMELINE'),
+                h(
+                  'div',
+                  { className: 'flex gap-2 overflow-x-auto' },
+                  ...battleFeed.map((e, i) =>
+                    h(
+                      'div',
+                      { key: i, className: 'panel p-2 text-[10px] min-w-[180px]' },
+                      h('div', { className: 'text-slate-400' }, e.timestamp),
+                      h('div', { className: 'mt-1' }, e.data?.description || e.data?.text || e.type)
+                    )
+                  )
+                )
+              ),
+              h(
+                'div',
+                { className: 'mt-6 flex gap-4' },
+                h('button', { className: 'btn btn-green', onClick: () => setPhase('pre') }, 'Back'),
+                h(
+                  'button',
+                  {
+                    className: 'btn btn-cyan',
+                    onClick: () => {
+                      const blob = new Blob([JSON.stringify(events, null, 2)], {
+                        type: 'application/json',
+                      });
+                      const url = URL.createObjectURL(blob);
+                      const a = document.createElement('a');
+                      a.href = url;
+                      a.download = 'matrixgpt-report.json';
+                      a.click();
+                      URL.revokeObjectURL(url);
+                    },
+                  },
+                  'Export Report'
+                )
+              )
+            )
+          );
+        }
+
+        return h(
+          'div',
+          { className: 'min-h-screen p-4' },
+          h(
+            'div',
+            { className: 'panel p-4 mb-4' },
+            h(
+              'div',
+              { className: 'flex flex-col md:flex-row md:items-center md:justify-between' },
+              h(
+                'div',
+                null,
+                h('div', { className: 'text-2xl tracking-[0.2em]' }, 'MATRIXGPT'),
+                h(
+                  'div',
+                  { className: 'text-xs text-slate-400' },
+                  'AUTONOMOUS ADVERSARIAL SECURITY WAR GAME'
+                )
+              ),
+              h(
+                'div',
+                { className: 'mt-4 md:mt-0 flex items-center gap-4 text-xs' },
+                h('span', { className: 'tag' }, loadingStatus ? 'SYNCING...' : 'DEFCON: 5'),
+                h('span', { style: { color: 'var(--red)' } }, `RED: ${redScoreDisplay} pts`),
+                h('span', { className: 'text-slate-400' }, '████████░░░░░░░░'),
+                h('span', { style: { color: 'var(--cyan)' } }, `BLUE: ${blueScoreDisplay} pts`),
+                h('span', { className: 'text-slate-400' }, `[${fmtTime(timer)}]`),
+                h('span', { className: 'text-slate-400' }, `WS: ${wsStatus}`),
+                h('button', { className: 'btn btn-cyan', onClick: () => setPhase('pre') }, 'Back'),
+                h('button', { className: 'btn btn-red', onClick: stopBattle }, 'Stop'),
+                h('button', { className: 'btn btn-red', onClick: stopAndReturn }, 'Stop + Return')
+              )
+            )
+          ),
+          h(
+            'div',
+            { className: 'grid grid-cols-1 lg:grid-cols-3 gap-4' },
+            h(
+              'div',
+              { className: `panel p-4 ${redActive ? 'glow-red' : ''}` },
+              h('div', { className: 'panel-title text-xs text-slate-400' }, 'RED TEAM'),
+              h(
+                'div',
+                { className: 'mt-2 flex gap-2 text-xs' },
+                h('button', { className: 'btn btn-red', onClick: () => setRedView('strategy') }, 'Strategy'),
+                h('button', { className: 'btn btn-red', onClick: () => setRedView('details') }, 'Details')
+              ),
+              h(
+                'div',
+                { className: 'mt-4 h-[420px] overflow-y-auto text-xs' },
+                ...(filterLog(redLog, redView).length
+                  ? filterLog(redLog, redView).map((e, i) =>
+                  h(
+                    'div',
+                    { key: i, className: 'event-entry mb-2' },
+                    h('div', { className: 'text-slate-400' }, `[${e.timestamp}] ${e.agent}`),
+                    h('div', { style: { color: 'var(--red)' } }, renderLogText(e))
+                  )
+                )
+                  : [h('div', { key: 'empty', className: 'text-slate-400' }, 'Awaiting Red Team events...')])
+              )
+            ),
+            h(
+              'div',
+              { className: 'panel p-4' },
+              h('div', { className: 'panel-title text-xs text-slate-400' }, 'BATTLE FEED'),
+              h(
+                'div',
+                { className: 'mt-4 h-[460px] overflow-y-auto text-xs' },
+                ...(battleFeed.length
+                  ? battleFeed.map((e, i) =>
+                  h(
+                    'div',
+                    { key: i, className: 'event-entry mb-2' },
+                    h('div', { className: 'text-slate-400' }, `[${e.timestamp}] ${e.agent}`),
+                    h(
+                      'div',
+                      {
+                        style: {
+                          color:
+                            e.team === 'red'
+                              ? 'var(--red)'
+                              : e.team === 'blue'
+                              ? 'var(--cyan)'
+                              : 'var(--green)',
+                        },
+                      },
+                      e.data?.description || e.data?.text || e.type
+                    )
+                  )
+                )
+                  : [h('div', { key: 'empty', className: 'text-slate-400' }, 'Waiting for battle events...')])
+              )
+            ),
+            h(
+              'div',
+              { className: `panel p-4 ${blueActive ? 'glow-cyan' : ''}` },
+              h('div', { className: 'panel-title text-xs text-slate-400' }, 'BLUE TEAM'),
+              h(
+                'div',
+                { className: 'mt-2 flex gap-2 text-xs' },
+                h('button', { className: 'btn btn-cyan', onClick: () => setBlueView('strategy') }, 'Strategy'),
+                h('button', { className: 'btn btn-cyan', onClick: () => setBlueView('details') }, 'Details')
+              ),
+              h(
+                'div',
+                { className: 'mt-4 h-[420px] overflow-y-auto text-xs' },
+                ...(filterLog(blueLog, blueView).length
+                  ? filterLog(blueLog, blueView).map((e, i) =>
+                  h(
+                    'div',
+                    { key: i, className: 'event-entry mb-2' },
+                    h('div', { className: 'text-slate-400' }, `[${e.timestamp}] ${e.agent}`),
+                    h('div', { style: { color: 'var(--cyan)' } }, renderLogText(e))
+                  )
+                )
+                  : [h('div', { key: 'empty', className: 'text-slate-400' }, 'Awaiting Blue Team events...')])
+              )
+            )
+          ),
+          h(
+            'div',
+            { className: 'panel p-4 mt-4' },
+            h('div', { className: 'panel-title text-xs text-slate-400' }, 'VULNERABILITIES BOARD'),
+            h(
+              'div',
+              { className: 'mt-4 grid grid-cols-1 md:grid-cols-5 gap-2 text-xs' },
+              ...vulns.map((v) => {
+                let color = '#475569';
+                if (v.status === 'found') color = 'var(--red)';
+                if (v.status === 'exploited') color = 'var(--red)';
+                if (v.status === 'patched') color = 'var(--green)';
+                return h(
+                  'div',
+                  { key: v.id, className: 'panel p-2' },
+                  h('div', { className: 'text-slate-400' }, v.name),
+                  h('div', { className: 'mt-2', style: { color } }, String(v.status || 'unknown').toUpperCase())
+                );
+              })
+            )
+          )
+        );
+      }
+
+      const root = createRoot(document.getElementById('root'));
+      root.render(h(App));
+    </script>
+  </body>
+</html>
