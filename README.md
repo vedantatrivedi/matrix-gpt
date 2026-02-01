@@ -31,9 +31,9 @@ AI Red Team agents attack. AI Blue Team agents defend. The war is live.
 <!-- TODO: Replace with your demo video link -->
 <!-- Recommended: unlisted YouTube link or a direct .mp4 hosted on GitHub releases -->
 
-> **📹 Demo video** — *[https://drive.google.com/file/d/17ha2B5rfdpW9j0CpX9V9tOMPssI9hUmq/view?usp=sharing]*
+> **📹 Demo video** — [https://drive.google.com/file/d/17ha2B5rfdpW9j0CpX9V9tOMPssI9hUmq/view?usp=sharing](https://drive.google.com/file/d/17ha2B5rfdpW9j0CpX9V9tOMPssI9hUmq/view?usp=sharing)
 >
-> If the video doesn't embed, use this direct link: `[https://drive.google.com/file/d/17ha2B5rfdpW9j0CpX9V9tOMPssI9hUmq/view?usp=sharing]`
+> If the video doesn't embed, use this direct link: [https://drive.google.com/file/d/17ha2B5rfdpW9j0CpX9V9tOMPssI9hUmq/view?usp=sharing](https://drive.google.com/file/d/17ha2B5rfdpW9j0CpX9V9tOMPssI9hUmq/view?usp=sharing)
 
 <!-- Uncomment and fill once you have the video: -->
 <!--
