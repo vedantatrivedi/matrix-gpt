@@ -69,9 +69,3 @@ logs/
 # OS
 .DS_Store
 Thumbs.db
-
-# Database files
-*.db
-orchestrator/matrixGPT.db
-sample-app/sample.db
-
