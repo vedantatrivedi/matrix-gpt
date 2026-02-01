@@ -67,7 +67,7 @@
       }
 
       function App() {
-        const [phase, setPhase] = useState('pre');
+        const [phase, setPhase] = useState(() => localStorage.getItem('matrixgpt_phase') || 'pre');
         const [target, setTarget] = useState('sample');
         const [battleId, setBattleId] = useState(null);
         const [redScore, setRedScore] = useState(0);
@@ -90,6 +90,10 @@
 
         const redScoreDisplay = useCountUp(redScore);
         const blueScoreDisplay = useCountUp(blueScore);
+
+        useEffect(() => {
+          localStorage.setItem('matrixgpt_phase', phase);
+        }, [phase]);
 
         useEffect(() => {
           if (phase !== 'battle') return;
@@ -131,26 +135,27 @@
             const res = await fetch('/api/battle/status');
             const data = await res.json();
             if (data.status === 'running') {
-              setPhase('battle');
               setBattleId(data.battle?.id);
               setActiveBattle(data.battle);
               setVulns(data.vulnerabilities || []);
-              const ev = await fetch(`/api/battle/events?battle_id=${data.battle?.id}`);
-              const evData = await ev.json();
-              const past = (evData.events || []).map((e) => ({
-                type: e.event_type,
-                team: e.team,
-                agent: e.agent_name,
-                timestamp: e.timestamp,
-                data: e.details || { description: e.description },
-              }));
-              const feed = past.filter((e) =>
-                e.type === 'battle_event' || e.type === 'patch_applied' || e.type === 'attack_detected'
-              );
-              setEvents(past);
-              setRedLog(past.filter((e) => e.team === 'red'));
-              setBlueLog(past.filter((e) => e.team === 'blue'));
-              setBattleFeed(feed);
+              if (phase === 'battle') {
+                const ev = await fetch(`/api/battle/events?battle_id=${data.battle?.id}`);
+                const evData = await ev.json();
+                const past = (evData.events || []).map((e) => ({
+                  type: e.event_type,
+                  team: e.team,
+                  agent: e.agent_name,
+                  timestamp: e.timestamp,
+                  data: e.details || { description: e.description },
+                }));
+                const feed = past.filter((e) =>
+                  e.type === 'battle_event' || e.type === 'patch_applied' || e.type === 'attack_detected'
+                );
+                setEvents(past);
+                setRedLog(past.filter((e) => e.team === 'red'));
+                setBlueLog(past.filter((e) => e.team === 'blue'));
+                setBattleFeed(feed);
+              }
             } else {
               setActiveBattle(null);
             }
@@ -486,7 +491,7 @@
                 h('span', { style: { color: 'var(--cyan)' } }, `BLUE: ${blueScoreDisplay} pts`),
                 h('span', { className: 'text-slate-400' }, `[${fmtTime(timer)}]`),
                 h('span', { className: 'text-slate-400' }, `WS: ${wsStatus}`),
-                h('button', { className: 'btn btn-cyan', onClick: () => setPhase('pre') }, 'Back'),
+                h('button', { className: 'btn btn-cyan', onClick: () => setPhase('pre') }, 'Home'),
                 h('button', { className: 'btn btn-red', onClick: stopBattle }, 'Stop'),
                 h('button', { className: 'btn btn-red', onClick: stopAndReturn }, 'Stop + Return')
               )
