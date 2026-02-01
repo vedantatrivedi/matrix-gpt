@@ -142,7 +142,7 @@ git checkout -b test/optimization-suite
 
 ### PR #1 - Emergency Fix
 ```bash
-git checkout master
+git checkout main
 git checkout -b emergency-fix/stop-battle-loop
 git add orchestrator/battle_manager.py
 git commit -m "Emergency fix: Stop battle loop after one iteration
@@ -157,7 +157,7 @@ Co-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>"
 
 ### PR #2 - Smart Tools
 ```bash
-git checkout master
+git checkout main
 git checkout -b feature/smart-filtering-tools
 git add orchestrator/agents/smart_tools.py
 git commit -m "Add smart filtering tools to reduce token usage
@@ -172,7 +172,7 @@ Co-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>"
 
 ### PR #3 - Agent Optimizations
 ```bash
-git checkout master
+git checkout main
 git checkout -b feature/agent-optimizations
 git add orchestrator/agents/red_team.py orchestrator/agents/blue_team.py
 git commit -m "Optimize agents: cheap models and short instructions
@@ -187,7 +187,7 @@ Co-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>"
 
 ### PR #4 - Truncation & Config
 ```bash
-git checkout master
+git checkout main
 git checkout -b feature/truncation-and-config
 git add orchestrator/agents/tools.py .env.example
 git commit -m "Add aggressive truncation and update environment config
@@ -201,7 +201,7 @@ Co-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>"
 
 ### PR #5 - Tests
 ```bash
-git checkout master
+git checkout main
 git checkout -b test/optimization-suite
 git add tests/test_smart_tools.py tests/test_optimizations.py test_optimizations.py
 git commit -m "Add comprehensive test suite for optimizations
