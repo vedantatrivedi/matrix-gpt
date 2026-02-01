@@ -2,6 +2,7 @@ import asyncio
 import json
 import sys
 import os
+import logging
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -11,6 +12,17 @@ PARENT = ROOT.parent
 if str(PARENT) not in sys.path:
     sys.path.insert(0, str(PARENT))
 
+# Configure agent logging to file
+LOGS_DIR = PARENT / "logs"
+LOGS_DIR.mkdir(exist_ok=True)
+
+agent_logger = logging.getLogger("agents")
+agent_logger.setLevel(logging.INFO)
+if not agent_logger.handlers:
+    handler = logging.FileHandler(LOGS_DIR / "agents.log")
+    handler.setFormatter(logging.Formatter("%(asctime)s [%(name)s] %(message)s"))
+    agent_logger.addHandler(handler)
+
 from orchestrator.oai_agents import Runner
 from orchestrator.agents.blue_team import blue_team_commander
 from orchestrator.agents.game_master import score_event
@@ -19,6 +31,7 @@ from orchestrator.agents.tools import set_battle_context
 from orchestrator.db import (
     create_battle,
     end_battle,
+    get_battle,
     insert_event,
     list_vulnerabilities,
     update_scores,
@@ -45,10 +58,19 @@ class BattleManager:
         return self._battle_id
 
     async def start_battle(self, target_url: str) -> str:
+        print(f"[DEBUG] start_battle called. Current _battle_id: {self._battle_id}")
+        # Check if existing battle is actually still running
         if self._battle_id:
-            return self._battle_id
+            existing_battle = get_battle(self._battle_id)
+            if existing_battle and existing_battle.get('status') == 'running':
+                print(f"[DEBUG] Returning existing running battle_id: {self._battle_id}")
+                return self._battle_id
+            else:
+                print(f"[DEBUG] Existing battle stopped, resetting")
+                self._battle_id = None
         self._target_url = target_url
         self._battle_id = create_battle(target_url)
+        print(f"[DEBUG] Created new battle_id: {self._battle_id}")
         self._start_time = datetime.utcnow()
         self._stop_event.clear()
 
@@ -68,8 +90,16 @@ class BattleManager:
             self._red_task = asyncio.create_task(self._mock_loop())
             self._blue_task = None
         else:
-            self._red_task = asyncio.create_task(self._red_loop())
-            self._blue_task = asyncio.create_task(self._blue_loop())
+            # FREE TIER FIX: If using flat agents, run teams sequentially
+            use_hierarchical = os.environ.get("USE_HIERARCHICAL_AGENTS", "false").lower() == "true"
+            if use_hierarchical:
+                # Paid tier: Start both teams concurrently
+                self._red_task = asyncio.create_task(self._red_loop())
+                self._blue_task = asyncio.create_task(self._blue_loop())
+            else:
+                # Free tier: Run teams one after another (Red completes, then Blue starts)
+                self._red_task = asyncio.create_task(self._sequential_battle())
+                self._blue_task = None  # Handled inside sequential_battle
         return self._battle_id
 
     async def stop_battle(self, status: str = "stopped") -> None:
@@ -95,17 +125,170 @@ class BattleManager:
         )
         self._battle_id = None
 
+    async def _sequential_battle(self) -> None:
+        """FREE TIER FIX: Run teams one after another to stay under 3 RPM.
+
+        Red team runs first, completes, then Blue team runs.
+        Adds 20s delay between teams to ensure rate limit window resets.
+        """
+        # Step 1: Run Red Team
+        await self._event_sink({
+            "type": "battle_event",
+            "team": "system",
+            "agent": "Battle Manager",
+            "timestamp": datetime.utcnow().isoformat(),
+            "data": {"description": "Starting Red Team (sequential mode)", "severity": "low"},
+        })
+        await self._red_loop()
+
+        # Step 2: Wait for rate limit window to reset (65s to ensure full 60s window passes)
+        if not self._should_stop():
+            await self._event_sink({
+                "type": "battle_event",
+                "team": "system",
+                "agent": "Battle Manager",
+                "timestamp": datetime.utcnow().isoformat(),
+                "data": {"description": "Red Team complete. Waiting 65s for rate limit window to reset...", "severity": "low"},
+            })
+            await asyncio.sleep(65)
+
+        # Step 3: Run Blue Team
+        if not self._should_stop():
+            await self._event_sink({
+                "type": "battle_event",
+                "team": "system",
+                "agent": "Battle Manager",
+                "timestamp": datetime.utcnow().isoformat(),
+                "data": {"description": "Starting Blue Team (sequential mode)", "severity": "low"},
+            })
+            await self._blue_loop()
+
+        # Step 4: Battle complete
+        await self.stop_battle("completed")
+
     async def _red_loop(self) -> None:
         """EMERGENCY FIX: Run once to prevent token explosion."""
         if self._should_stop():
             return
 
+        # PRE-SCAN: Run recon WITHOUT LLM to save tokens
         try:
+            from orchestrator.agents.recon import run_prescan, format_findings_for_llm
+
+            agent_logger.info("=== PRE-SCAN STARTED ===")
+            agent_logger.info(f"Target: {self._target_url}")
+
+            # UI Event: Pre-scan started
+            await self._event_sink({
+                "type": "battle_event",
+                "team": "red",
+                "agent": "Pre-Scan",
+                "timestamp": datetime.utcnow().isoformat(),
+                "data": {"description": f"Starting pre-scan of {self._target_url} (20 endpoints)", "severity": "low"}
+            })
+
+            # Step 1: Port discovery
+            await self._event_sink({
+                "type": "battle_event",
+                "team": "red",
+                "agent": "Pre-Scan",
+                "timestamp": datetime.utcnow().isoformat(),
+                "data": {"description": "Discovering open ports...", "severity": "low"}
+            })
+
+            prescan_result = await asyncio.to_thread(run_prescan, self._target_url)
+
+            # Step 2: Report port discovery
+            agent_logger.info(f"=== PRE-SCAN COMPLETE ===")
+            agent_logger.info(f"Ports discovered: {prescan_result['ports_discovered']}")
+            agent_logger.info(f"Endpoints tested: {prescan_result['total_tested']}")
+            agent_logger.info(f"CRITICAL: {prescan_result['critical_count']}, HIGH: {prescan_result['high_count']}")
+
+            await self._event_sink({
+                "type": "battle_event",
+                "team": "red",
+                "agent": "Pre-Scan",
+                "timestamp": datetime.utcnow().isoformat(),
+                "data": {
+                    "description": f"Port scan complete: {prescan_result['ports_discovered']} ports open, testing {prescan_result['total_tested']} endpoints",
+                    "severity": "low"
+                }
+            })
+
+            # Step 3: Report vulnerabilities
+            await self._event_sink({
+                "type": "battle_event",
+                "team": "red",
+                "agent": "Pre-Scan",
+                "timestamp": datetime.utcnow().isoformat(),
+                "data": {
+                    "description": f"Scan complete: {prescan_result['critical_count']} CRITICAL, {prescan_result['high_count']} HIGH severity issues found",
+                    "severity": "high" if prescan_result['critical_count'] > 0 else ("medium" if prescan_result['high_count'] > 0 else "low")
+                }
+            })
+
+            # Announce CRITICAL vulnerabilities
+            findings = prescan_result['findings']
+            if findings['critical']:
+                for vuln in findings['critical']:
+                    vuln_type = vuln.get('type', 'Unknown')
+                    await self._event_sink({
+                        "type": "attack_detected",
+                        "team": "red",
+                        "agent": "Pre-Scan",
+                        "timestamp": datetime.utcnow().isoformat(),
+                        "data": {
+                            "description": f"🔴 CRITICAL: {vuln_type} at {vuln['url']}",
+                            "severity": "critical"
+                        }
+                    })
+                    agent_logger.info(f"CRITICAL: {vuln_type} - {vuln['url']}")
+
+            # Announce HIGH vulnerabilities
+            if findings['high']:
+                for vuln in findings['high']:
+                    vuln_type = vuln.get('type', 'Unknown')
+                    await self._event_sink({
+                        "type": "attack_detected",
+                        "team": "red",
+                        "agent": "Pre-Scan",
+                        "timestamp": datetime.utcnow().isoformat(),
+                        "data": {
+                            "description": f"🟠 HIGH: {vuln_type} at {vuln['url']}",
+                            "severity": "high"
+                        }
+                    })
+                    agent_logger.info(f"HIGH: {vuln_type} - {vuln['url']}")
+
+            # Format findings for LLM
+            findings_text = format_findings_for_llm(prescan_result)
+
+            agent_logger.info(f"=== FINDINGS FOR LLM ===")
+            agent_logger.info(findings_text)
+
+            # UI Event: Sending to LLM for analysis
+            await self._event_sink({
+                "type": "battle_event",
+                "team": "red",
+                "agent": "Red Team Commander",
+                "timestamp": datetime.utcnow().isoformat(),
+                "data": {"description": "Analyzing vulnerabilities with AI...", "severity": "low"}
+            })
+
+            # Now call LLM with pre-scanned findings
             await self._run_agent_loop(
                 team="red",
                 agent_name="Red Team Commander",
                 agent=red_team_commander,
-                input_text=f"Target URL: {self._target_url}",
+                input_text=findings_text,
+            )
+        except ImportError:
+            # Fallback to old method if recon module not available
+            await self._run_agent_loop(
+                team="red",
+                agent_name="Red Team Commander",
+                agent=red_team_commander,
+                input_text=f"Scan {self._target_url}. Test common endpoints: /, /api, /admin, /login, /api/users, /api/products. Use tools.",
             )
         except asyncio.CancelledError:
             return
@@ -120,8 +303,11 @@ class BattleManager:
                 }
             )
 
-        # STOP HERE - Don't loop to prevent conversation history explosion
-        await self.stop_battle("completed")
+        # DON'T stop battle here in sequential mode - let _sequential_battle handle it
+        # Only stop in hierarchical mode (when both teams run concurrently)
+        use_hierarchical = os.environ.get("USE_HIERARCHICAL_AGENTS", "false").lower() == "true"
+        if use_hierarchical:
+            await self.stop_battle("completed")
 
         # ORIGINAL LOOP (commented out to save tokens):
         # while not self._stop_event.is_set():
@@ -146,7 +332,7 @@ class BattleManager:
                 team="blue",
                 agent_name="Blue Team Commander",
                 agent=blue_team_commander,
-                input_text="Analyze recent logs and patch any detected vulnerabilities.",
+                input_text="Check logs. Patch.",
             )
         except asyncio.CancelledError:
             return
@@ -558,6 +744,14 @@ class BattleManager:
         async for event in result.stream_events():
             await self._handle_stream_event(team, agent_name, event)
         final_output = getattr(result, "final_output", None)
+
+        # Log final output to agents.log
+        agent_logger.info(f"=== AGENT FINAL OUTPUT ===")
+        agent_logger.info(f"Agent: {agent_name}")
+        agent_logger.info(f"Team: {team}")
+        agent_logger.info(f"Output length: {len(str(final_output)) if final_output else 0} chars")
+        agent_logger.info(f"Output: {str(final_output) if final_output else 'None'}")  # Full output
+
         if final_output:
             insert_event(
                 self._battle_id,
@@ -580,12 +774,30 @@ class BattleManager:
             self._update_vuln_status_from_text(str(final_output))
 
     async def _run_streamed_with_retry(self, agent, input_text: str):
+        # Log request to model
+        agent_logger.info(f"=== API REQUEST ===")
+        agent_logger.info(f"Agent: {agent.name}")
+        agent_logger.info(f"Model: {agent.model}")
+        agent_logger.info(f"Input length: {len(input_text)} chars")
+        agent_logger.info(f"Input preview: {input_text[:300]}")
+        agent_logger.info(f"Tools: {[t.__name__ if hasattr(t, '__name__') else str(t) for t in getattr(agent, 'tools', [])]}")
+
         try:
-            return Runner.run_streamed(agent, input=input_text)
+            result = Runner.run_streamed(agent, input=input_text)
+            agent_logger.info(f"API call started, streaming response...")
+            return result
+
         except Exception as exc:
             message = str(exc)
+            agent_logger.error(f"=== API ERROR ===")
+            agent_logger.error(f"Agent: {agent.name}")
+            agent_logger.error(f"Error: {message[:500]}")
+
             if "Rate limit" in message or "rate limit" in message or "429" in message:
+                agent_logger.info(f"Rate limit hit, waiting {self._rate_limit_backoff}s and retrying...")
                 await asyncio.sleep(self._rate_limit_backoff)
+                agent_logger.info(f"=== API RETRY ===")
+                agent_logger.info(f"Agent: {agent.name}")
                 return Runner.run_streamed(agent, input=input_text)
             raise
 
