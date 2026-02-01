@@ -11,26 +11,18 @@ except ModuleNotFoundError:
     from agents.tools import apply_patch, get_recent_logs, get_source_file
 
 
-SOC_INSTRUCTIONS = """
-You are SOC. Scan recent logs for SQLi, XSS, brute force, IDOR, SSRF, auth bypass.
-Return attack type, confidence, and evidence. Be concise.
-""".strip()
+SOC_INSTRUCTIONS = "Scan logs for attacks. Report type and evidence. Brief."
 
-PATCH_DEV_INSTRUCTIONS = """
-You are a security engineer. Produce a minimal unified diff patch to fix the given vuln.
-Return diff + one-sentence summary. Be concise.
-""".strip()
+PATCH_DEV_INSTRUCTIONS = "Create unified diff patch. Brief summary."
 
-COMMANDER_INSTRUCTIONS = """
-You are Blue Team Commander. Trigger SOC, then Patch Developer on confirmed attacks.
-Summarize actions briefly in bullets. Be concise.
-""".strip()
+COMMANDER_INSTRUCTIONS = "Run SOC→Patch. Brief bullets."
 
 
 RUN_MODE = os.environ.get("RUN_MODE", "demo")
-MODEL = os.environ.get("BLUE_TEAM_MODEL", "gpt-5.2-pro" if RUN_MODE == "prod" else "gpt-5-mini")
-SOC_MODEL = os.environ.get("SOC_MODEL", "gpt-5-mini")
-PATCH_MODEL = os.environ.get("PATCH_MODEL", "gpt-5.2-codex" if RUN_MODE == "prod" else "gpt-5-mini")
+# OPTIMIZATION: Use cheapest model to save tokens
+MODEL = os.environ.get("BLUE_TEAM_MODEL", "gpt-4o-mini")
+SOC_MODEL = os.environ.get("SOC_MODEL", "gpt-4o-mini")
+PATCH_MODEL = os.environ.get("PATCH_MODEL", "gpt-4o-mini")
 
 
 soc_monitor = Agent(

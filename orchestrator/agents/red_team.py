@@ -6,58 +6,68 @@ except ModuleNotFoundError:
     from oai_agents import Agent
 
 try:
-    from orchestrator.agents.tools import http_get, http_post
+    from orchestrator.agents.smart_tools import (
+        http_batch_get_smart,
+        test_sqli_smart,
+        test_xss_smart,
+        scan_for_vulns_comprehensive,
+    )
 except ModuleNotFoundError:
-    from agents.tools import http_get, http_post
+    from agents.smart_tools import (
+        http_batch_get_smart,
+        test_sqli_smart,
+        test_xss_smart,
+        scan_for_vulns_comprehensive,
+    )
+
+try:
+    from orchestrator.agents.tools import (
+        query_recon_data,
+        get_recon_summary,
+    )
+except ModuleNotFoundError:
+    from agents.tools import (
+        query_recon_data,
+        get_recon_summary,
+    )
 
 
-RECON_INSTRUCTIONS = """
-You are a recon tester. Map endpoints, inputs, and errors. Start at / then probe /api, /admin, /auth.
-Be concise and output bullet points only.
-""".strip()
+RECON_INSTRUCTIONS = "Scan with http_batch_get_smart. List vulns found."
 
-VULN_HUNTER_INSTRUCTIONS = """
-You validate likely vulns using real HTTP requests: SQLi, XSS, auth bypass, IDOR, info disclosure.
-For each confirmed vuln, report type, endpoint, payload, and proof. Be concise.
-""".strip()
+VULN_HUNTER_INSTRUCTIONS = "Use test_sqli_smart and test_xss_smart. Brief."
 
-EXPLOIT_DEV_INSTRUCTIONS = """
-Chain confirmed vulns to maximize impact. Execute each step via HTTP requests.
-Return a short numbered list with key request/response proof. Be concise.
-""".strip()
+EXPLOIT_DEV_INSTRUCTIONS = "Chain exploits. Brief."
 
-COMMANDER_INSTRUCTIONS = """
-You orchestrate recon → vuln hunt → exploit chain. Summarize strategy briefly and dispatch agents.
-Be concise and use bullet points.
-""".strip()
+COMMANDER_INSTRUCTIONS = "Run: recon→hunt→exploit. Brief bullets."
 
 
 RUN_MODE = os.environ.get("RUN_MODE", "demo")
-MODEL = os.environ.get("RED_TEAM_MODEL", "gpt-5.2-pro" if RUN_MODE == "prod" else "gpt-5-mini")
-RECON_MODEL = os.environ.get("RECON_MODEL", "gpt-5-mini")
-HUNTER_MODEL = os.environ.get("VULN_HUNTER_MODEL", "gpt-5-mini")
-EXPLOIT_MODEL = os.environ.get("EXPLOIT_MODEL", MODEL)
+# OPTIMIZATION: Use cheapest model to save tokens
+MODEL = os.environ.get("RED_TEAM_MODEL", "gpt-4o-mini")
+RECON_MODEL = os.environ.get("RECON_MODEL", "gpt-4o-mini")
+HUNTER_MODEL = os.environ.get("VULN_HUNTER_MODEL", "gpt-4o-mini")
+EXPLOIT_MODEL = os.environ.get("EXPLOIT_MODEL", "gpt-4o-mini")
 
 
 recon_agent = Agent(
     name="Recon Agent",
     model=RECON_MODEL,
     instructions=RECON_INSTRUCTIONS,
-    tools=[http_get, http_post],
+    tools=[http_batch_get_smart, get_recon_summary],
 )
 
 vulnerability_hunter = Agent(
     name="Vulnerability Hunter",
     model=HUNTER_MODEL,
     instructions=VULN_HUNTER_INSTRUCTIONS,
-    tools=[http_get, http_post],
+    tools=[test_sqli_smart, test_xss_smart, scan_for_vulns_comprehensive, query_recon_data],
 )
 
 exploit_developer = Agent(
     name="Exploit Developer",
     model=EXPLOIT_MODEL,
     instructions=EXPLOIT_DEV_INSTRUCTIONS,
-    tools=[http_get, http_post],
+    tools=[http_batch_get_smart, get_recon_summary],
 )
 
 red_team_commander = Agent(
