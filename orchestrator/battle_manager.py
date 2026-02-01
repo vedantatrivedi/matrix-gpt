@@ -15,6 +15,7 @@ from orchestrator.oai_agents import Runner
 from orchestrator.agents.blue_team import blue_team_commander
 from orchestrator.agents.game_master import score_event
 from orchestrator.agents.red_team import red_team_commander
+from orchestrator.agents.tools import set_battle_context
 from orchestrator.db import (
     create_battle,
     end_battle,
@@ -50,6 +51,10 @@ class BattleManager:
         self._battle_id = create_battle(target_url)
         self._start_time = datetime.utcnow()
         self._stop_event.clear()
+
+        # Set battle context for recon tools
+        set_battle_context(self._battle_id)
+
         await self._event_sink(
             {
                 "type": "battle_start",
@@ -91,56 +96,73 @@ class BattleManager:
         self._battle_id = None
 
     async def _red_loop(self) -> None:
-        while not self._stop_event.is_set():
-            if self._should_stop():
-                await self.stop_battle("completed")
-                return
-            try:
-                await self._run_agent_loop(
-                    team="red",
-                    agent_name="Red Team Commander",
-                    agent=red_team_commander,
-                    input_text=f"Target URL: {self._target_url}",
-                )
-            except asyncio.CancelledError:
-                return
-            except Exception as exc:
-                await self._event_sink(
-                    {
-                        "type": "battle_event",
-                        "team": "system",
-                        "agent": "Battle Manager",
-                        "timestamp": datetime.utcnow().isoformat(),
-                        "data": {"description": f"Red loop error: {exc}", "severity": "low"},
-                    }
-                )
-            await asyncio.sleep(self._throttle_seconds)
+        """EMERGENCY FIX: Run once to prevent token explosion."""
+        if self._should_stop():
+            return
+
+        try:
+            await self._run_agent_loop(
+                team="red",
+                agent_name="Red Team Commander",
+                agent=red_team_commander,
+                input_text=f"Target URL: {self._target_url}",
+            )
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            await self._event_sink(
+                {
+                    "type": "battle_event",
+                    "team": "system",
+                    "agent": "Battle Manager",
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "data": {"description": f"Red loop error: {exc}", "severity": "low"},
+                }
+            )
+
+        # STOP HERE - Don't loop to prevent conversation history explosion
+        await self.stop_battle("completed")
+
+        # ORIGINAL LOOP (commented out to save tokens):
+        # while not self._stop_event.is_set():
+        #     if self._should_stop():
+        #         await self.stop_battle("completed")
+        #         return
+        #     try:
+        #         await self._run_agent_loop(...)
+        #     except asyncio.CancelledError:
+        #         return
+        #     except Exception as exc:
+        #         await self._event_sink({...})
+        #     await asyncio.sleep(self._throttle_seconds)
 
     async def _blue_loop(self) -> None:
-        while not self._stop_event.is_set():
-            if self._should_stop():
-                await self.stop_battle("completed")
-                return
-            try:
-                await self._run_agent_loop(
-                    team="blue",
-                    agent_name="Blue Team Commander",
-                    agent=blue_team_commander,
-                    input_text="Analyze recent logs and patch any detected vulnerabilities.",
-                )
-            except asyncio.CancelledError:
-                return
-            except Exception as exc:
-                await self._event_sink(
-                    {
-                        "type": "battle_event",
-                        "team": "system",
-                        "agent": "Battle Manager",
-                        "timestamp": datetime.utcnow().isoformat(),
-                        "data": {"description": f"Blue loop error: {exc}", "severity": "low"},
-                    }
-                )
-            await asyncio.sleep(self._throttle_seconds)
+        """EMERGENCY FIX: Run once to prevent token explosion."""
+        if self._should_stop():
+            return
+
+        try:
+            await self._run_agent_loop(
+                team="blue",
+                agent_name="Blue Team Commander",
+                agent=blue_team_commander,
+                input_text="Analyze recent logs and patch any detected vulnerabilities.",
+            )
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            await self._event_sink(
+                {
+                    "type": "battle_event",
+                    "team": "system",
+                    "agent": "Battle Manager",
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "data": {"description": f"Blue loop error: {exc}", "severity": "low"},
+                }
+            )
+
+        # STOP HERE - Don't loop
+        # Original loop commented out to save tokens
 
     def _should_stop(self) -> bool:
         if not self._battle_id or not self._start_time:
@@ -579,30 +601,25 @@ class BattleManager:
             await self._event_sink(payload)
 
     async def _score_and_broadcast(self, description: str) -> None:
-        if not self._battle_id:
-            return
-        score = await score_event(description)
-        if not score.get("allowed", True):
-            return
-        team = score.get("team")
-        delta = int(score.get("score_change", 0))
-        if team == "red":
-            scores = update_scores(self._battle_id, red_delta=delta)
-        else:
-            scores = update_scores(self._battle_id, blue_delta=delta)
-        await self._event_sink(
-            {
-                "type": "score_update",
-                "team": "system",
-                "agent": "Game Master",
-                "timestamp": datetime.utcnow().isoformat(),
-                "data": {
-                    "red_score": scores["red_score"],
-                    "blue_score": scores["blue_score"],
-                    "reason": score.get("reason"),
-                },
-            }
-        )
+        """EMERGENCY FIX: Scoring disabled to save tokens (100+ API calls)."""
+        # TODO: Re-enable with rule-based scoring (no LLM calls)
+        # from optimizations_quick_wins import score_event_rules
+        # score = score_event_rules(description)
+        return
+
+        # ORIGINAL CODE (commented out):
+        # if not self._battle_id:
+        #     return
+        # score = await score_event(description)
+        # if not score.get("allowed", True):
+        #     return
+        # team = score.get("team")
+        # delta = int(score.get("score_change", 0))
+        # if team == "red":
+        #     scores = update_scores(self._battle_id, red_delta=delta)
+        # else:
+        #     scores = update_scores(self._battle_id, blue_delta=delta)
+        # await self._event_sink({...})
 
     def _update_vuln_status_from_text(self, text: str) -> None:
         if not self._battle_id:
