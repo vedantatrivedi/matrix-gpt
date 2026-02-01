@@ -27,7 +27,7 @@ from orchestrator.oai_agents import Runner
 from orchestrator.agents.blue_team import blue_team_commander
 from orchestrator.agents.game_master import score_event
 from orchestrator.agents.red_team import red_team_commander
-from orchestrator.agents.tools import set_battle_context
+from orchestrator.agents.tools import get_recent_logs, set_battle_context
 from orchestrator.db import (
     create_battle,
     end_battle,
@@ -38,6 +38,7 @@ from orchestrator.db import (
     update_vuln_status,
 )
 
+from agents.items import ItemHelpers
 from openai.types.responses import ResponseTextDeltaEvent
 
 
@@ -52,6 +53,8 @@ class BattleManager:
         self._start_time: Optional[datetime] = None
         self._throttle_seconds = float(os.environ.get("AGENT_THROTTLE_SECONDS", "2.0"))
         self._rate_limit_backoff = float(os.environ.get("AGENT_RATE_LIMIT_BACKOFF", "3.0"))
+        self._round_state: Optional[Dict[str, Any]] = None
+        self._tool_call_index: Dict[str, str] = {}
 
     @property
     def battle_id(self) -> Optional[str]:
@@ -98,7 +101,7 @@ class BattleManager:
                 self._blue_task = asyncio.create_task(self._blue_loop())
             else:
                 # Free tier: Run teams one after another (Red completes, then Blue starts)
-                self._red_task = asyncio.create_task(self._sequential_battle())
+                self._red_task = asyncio.create_task(self._round_battle())
                 self._blue_task = None  # Handled inside sequential_battle
         return self._battle_id
 
@@ -125,46 +128,75 @@ class BattleManager:
         )
         self._battle_id = None
 
-    async def _sequential_battle(self) -> None:
-        """FREE TIER FIX: Run teams one after another to stay under 3 RPM.
+    async def _round_battle(self) -> None:
+        """Run a 3-round match with continuous Blue monitoring."""
+        rounds = 3
+        round_delay = float(os.environ.get("ROUND_DELAY_SECONDS", "10"))
+        for round_index in range(1, rounds + 1):
+            if self._should_stop():
+                break
 
-        Red team runs first, completes, then Blue team runs.
-        Adds 20s delay between teams to ensure rate limit window resets.
-        """
-        # Step 1: Run Red Team
-        await self._event_sink({
-            "type": "battle_event",
-            "team": "system",
-            "agent": "Battle Manager",
-            "timestamp": datetime.utcnow().isoformat(),
-            "data": {"description": "Starting Red Team (sequential mode)", "severity": "low"},
-        })
-        await self._red_loop()
+            self._round_state = {
+                "active": True,
+                "round": round_index,
+                "winner": None,
+                "exploit_called": False,
+                "exploit_succeeded": False,
+                "tool_failure": False,
+                "blocked_by_blue": False,
+                "last_vuln": None,
+            }
+            self._tool_call_index.clear()
 
-        # Step 2: Wait for rate limit window to reset (65s to ensure full 60s window passes)
-        if not self._should_stop():
             await self._event_sink({
-                "type": "battle_event",
+                "type": "round_start",
                 "team": "system",
                 "agent": "Battle Manager",
                 "timestamp": datetime.utcnow().isoformat(),
-                "data": {"description": "Red Team complete. Waiting 65s for rate limit window to reset...", "severity": "low"},
+                "data": {"round": round_index, "description": f"Round {round_index} started"},
             })
-            await asyncio.sleep(65)
 
-        # Step 3: Run Blue Team
+            red_task = asyncio.create_task(self._red_loop())
+            blue_monitor = asyncio.create_task(self._blue_monitor_loop())
+
+            try:
+                while not red_task.done():
+                    if self._round_state.get("winner"):
+                        red_task.cancel()
+                        break
+                    await asyncio.sleep(0.2)
+                await asyncio.gather(red_task, return_exceptions=True)
+            except asyncio.CancelledError:
+                pass
+
+            if self._round_state.get("winner") is None:
+                if self._round_state.get("exploit_succeeded"):
+                    await self._finalize_round("red", "Exploit succeeded", round_index)
+                elif self._round_state.get("tool_failure"):
+                    await self._finalize_round("draw", "Tool failure (unintentional)", round_index)
+                else:
+                    await self._finalize_round("draw", "No decisive outcome", round_index)
+
+            if not blue_monitor.done():
+                blue_monitor.cancel()
+                await asyncio.gather(blue_monitor, return_exceptions=True)
+
+            self._round_state["active"] = False
+            if self._round_state.get("winner") == "red":
+                await self._event_sink({
+                    "type": "battle_event",
+                    "team": "system",
+                    "agent": "Battle Manager",
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "data": {"description": "Blue Team patching before next round...", "severity": "low"},
+                })
+                await self._blue_patch_after_loss(round_index)
+
+            if round_index < rounds and not self._should_stop():
+                await asyncio.sleep(round_delay)
+
         if not self._should_stop():
-            await self._event_sink({
-                "type": "battle_event",
-                "team": "system",
-                "agent": "Battle Manager",
-                "timestamp": datetime.utcnow().isoformat(),
-                "data": {"description": "Starting Blue Team (sequential mode)", "severity": "low"},
-            })
-            await self._blue_loop()
-
-        # Step 4: Battle complete
-        await self.stop_battle("completed")
+            await self.stop_battle("completed")
 
     async def _red_loop(self) -> None:
         """EMERGENCY FIX: Run once to prevent token explosion."""
@@ -344,6 +376,33 @@ class BattleManager:
                     "agent": "Battle Manager",
                     "timestamp": datetime.utcnow().isoformat(),
                     "data": {"description": f"Blue loop error: {exc}", "severity": "low"},
+                }
+            )
+
+    async def _blue_patch_after_loss(self, round_index: int) -> None:
+        if self._should_stop():
+            return
+        vuln_details = self._round_state.get("last_vuln") if self._round_state else None
+        prompt = "Patch the vulnerability exploited in the previous round. Focus on sample-app/app.py."
+        if vuln_details:
+            prompt += f" Details: {vuln_details}"
+        try:
+            await self._run_agent_loop(
+                team="blue",
+                agent_name="Blue Team Commander",
+                agent=blue_team_commander,
+                input_text=prompt,
+            )
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            await self._event_sink(
+                {
+                    "type": "battle_event",
+                    "team": "system",
+                    "agent": "Battle Manager",
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "data": {"description": f"Blue patch error: {exc}", "severity": "low"},
                 }
             )
 
@@ -744,6 +803,7 @@ class BattleManager:
         async for event in result.stream_events():
             await self._handle_stream_event(team, agent_name, event)
         final_output = getattr(result, "final_output", None)
+        fallback_output = self._extract_last_message_text(result)
 
         # Log final output to agents.log
         agent_logger.info(f"=== AGENT FINAL OUTPUT ===")
@@ -752,14 +812,15 @@ class BattleManager:
         agent_logger.info(f"Output length: {len(str(final_output)) if final_output else 0} chars")
         agent_logger.info(f"Output: {str(final_output) if final_output else 'None'}")  # Full output
 
-        if final_output:
+        output_text = str(final_output) if final_output else fallback_output
+        if output_text and self._battle_id:
             insert_event(
                 self._battle_id,
                 event_type="battle_event",
                 team=team,
                 agent_name=agent_name,
-                description=str(final_output),
-                details={"output": str(final_output)},
+                description=output_text,
+                details={"output": output_text},
             )
             await self._event_sink(
                 {
@@ -767,11 +828,13 @@ class BattleManager:
                     "team": team,
                     "agent": agent_name,
                     "timestamp": datetime.utcnow().isoformat(),
-                    "data": {"description": str(final_output), "severity": "medium"},
+                    "data": {"description": output_text, "severity": "medium"},
                 }
             )
-            await self._score_and_broadcast(str(final_output))
-            self._update_vuln_status_from_text(str(final_output))
+            await self._score_and_broadcast(output_text)
+            self._update_vuln_status_from_text(output_text)
+
+        self._emit_model_usage(agent.model, result)
 
     async def _run_streamed_with_retry(self, agent, input_text: str):
         # Log request to model
@@ -803,21 +866,129 @@ class BattleManager:
 
     async def _handle_stream_event(self, team: str, agent_name: str, event) -> None:
         if event.type == "raw_response_event" and isinstance(event.data, ResponseTextDeltaEvent):
-            payload = {
-                "type": "agent_thinking",
-                "team": team,
-                "agent": agent_name,
-                "timestamp": datetime.utcnow().isoformat(),
-                "data": {"text": event.data.delta[:200]},
-            }
-            await self._event_sink(payload)
+            # Skip raw deltas to avoid letter-by-letter UI noise.
+            return
+
+        if event.type == "run_item_stream_event":
+            if event.name == "message_output_created":
+                text = ItemHelpers.extract_last_text(event.item.raw_item)
+                if text and self._battle_id:
+                    insert_event(
+                        self._battle_id,
+                        event_type="agent_message",
+                        team=team,
+                        agent_name=agent_name,
+                        description=text,
+                        details={"text": text},
+                    )
+                    await self._event_sink(
+                        {
+                            "type": "agent_message",
+                            "team": team,
+                            "agent": agent_name,
+                            "timestamp": datetime.utcnow().isoformat(),
+                            "data": {"text": text},
+                        }
+                    )
+            elif event.name == "tool_called":
+                raw = event.item.raw_item
+                tool_name = getattr(raw, "name", None)
+                args_raw = getattr(raw, "arguments", None)
+                call_id = getattr(raw, "call_id", None)
+                args = args_raw
+                if isinstance(args_raw, str):
+                    try:
+                        args = json.loads(args_raw)
+                    except json.JSONDecodeError:
+                        args = {"raw": args_raw}
+                if call_id and tool_name:
+                    self._tool_call_index[call_id] = tool_name
+                if self._round_state and self._round_state.get("active") and tool_name == "exploit_vulnerability":
+                    self._round_state["exploit_called"] = True
+
+                if self._battle_id:
+                    insert_event(
+                        self._battle_id,
+                        event_type="tool_call",
+                        team=team,
+                        agent_name=agent_name,
+                        description=f"{tool_name} call",
+                        details={"tool": tool_name, "args": args, "call_id": call_id},
+                    )
+                    await self._event_sink(
+                        {
+                            "type": "tool_call",
+                            "team": team,
+                            "agent": agent_name,
+                            "timestamp": datetime.utcnow().isoformat(),
+                            "data": {"tool": tool_name, "args": args, "call_id": call_id},
+                        }
+                    )
+            elif event.name == "tool_output":
+                raw = event.item.raw_item
+                call_id = raw.get("call_id") if isinstance(raw, dict) else getattr(raw, "call_id", None)
+                output = event.item.output
+                tool_name = self._tool_call_index.get(call_id)
+                if self._round_state and self._round_state.get("active"):
+                    if self._output_failed(output):
+                        self._round_state["tool_failure"] = True
+                        await self._finalize_round("draw", "Tool failure (unintentional)", self._round_state["round"])
+                    if tool_name == "exploit_vulnerability":
+                        self._round_state["last_vuln"] = output
+                        if self._exploit_succeeded(output):
+                            self._round_state["exploit_succeeded"] = True
+                            await self._finalize_round("red", "Exploit succeeded", self._round_state["round"])
+                if self._battle_id:
+                    insert_event(
+                        self._battle_id,
+                        event_type="tool_result",
+                        team=team,
+                        agent_name=agent_name,
+                        description="tool result",
+                        details={"output": output, "call_id": call_id},
+                    )
+                    await self._event_sink(
+                        {
+                            "type": "tool_result",
+                            "team": team,
+                            "agent": agent_name,
+                            "timestamp": datetime.utcnow().isoformat(),
+                            "data": {"output": output, "call_id": call_id},
+                        }
+                    )
 
     async def _score_and_broadcast(self, description: str) -> None:
-        """EMERGENCY FIX: Scoring disabled to save tokens (100+ API calls)."""
-        # TODO: Re-enable with rule-based scoring (no LLM calls)
-        # from optimizations_quick_wins import score_event_rules
-        # score = score_event_rules(description)
-        return
+        """Rule-based scoring (no LLM calls)."""
+        if self._round_state and self._round_state.get("active"):
+            return
+        if not self._battle_id:
+            return
+        score = self._score_event_rules(description)
+        if not score.get("allowed", True):
+            return
+        delta = int(score.get("score_change", 0) or 0)
+        if delta == 0:
+            return
+        team = score.get("team")
+        if team == "red":
+            scores = update_scores(self._battle_id, red_delta=delta)
+        elif team == "blue":
+            scores = update_scores(self._battle_id, blue_delta=delta)
+        else:
+            return
+        await self._event_sink(
+            {
+                "type": "score_update",
+                "team": "system",
+                "agent": "Game Master",
+                "timestamp": datetime.utcnow().isoformat(),
+                "data": {
+                    "red_score": scores["red_score"],
+                    "blue_score": scores["blue_score"],
+                    "reason": score.get("reason", "score update"),
+                },
+            }
+        )
 
         # ORIGINAL CODE (commented out):
         # if not self._battle_id:
@@ -851,3 +1022,205 @@ class BattleManager:
         for key, name in mapping.items():
             if key.lower() in text.lower():
                 update_vuln_status(self._battle_id, name, "found")
+
+    def _score_event_rules(self, description: str) -> Dict[str, Any]:
+        """Lightweight scoring heuristics to avoid extra model calls."""
+        if not description:
+            return {"score_change": 0, "team": "red", "reason": "empty", "allowed": True}
+        d = description.lower()
+        score = 0
+        team = None
+        reasons = []
+
+        # Red team scoring
+        if any(k in d for k in ["critical", "high"]) and any(k in d for k in ["vulnerability", "sql injection", "xss", "sqli"]):
+            score += 50
+            team = "red"
+            reasons.append("vulnerability discovered")
+        if any(k in d for k in ["exploited", "exploit", "success_rate"]) and any(k in d for k in ["sqli", "xss", "cmdi", "path traversal", "sql injection"]):
+            score += 100
+            team = "red"
+            reasons.append("exploit succeeded")
+        if any(k in d for k in ["exfiltrat", "dump", "dumping users", "credentials"]):
+            score += 200
+            team = "red"
+            reasons.append("data exfiltration")
+        if any(k in d for k in ["admin access", "gained admin", "admin credentials"]):
+            score += 300
+            team = "red"
+            reasons.append("admin access")
+        if any(k in d for k in ["chain", "chaining", "multi-step"]):
+            score += 150
+            team = "red"
+            reasons.append("exploit chain")
+
+        # Blue team scoring
+        if any(k in d for k in ["patch applied", "patched", "patch", "reloaded"]):
+            score += 150
+            team = "blue"
+            reasons.append("patch applied")
+        if any(k in d for k in ["detected attack", "attack detected", "intrusion detected"]):
+            score += 75
+            team = "blue"
+            reasons.append("attack detected")
+        if any(k in d for k in ["blocked", "prevented"]) and "exploit" in d:
+            score += 200
+            team = "blue"
+            reasons.append("exploit blocked")
+
+        if score == 0 or team is None:
+            return {"score_change": 0, "team": "red", "reason": "no score", "allowed": True}
+        return {"score_change": score, "team": team, "reason": "; ".join(reasons), "allowed": True}
+
+    def _extract_last_message_text(self, result) -> Optional[str]:
+        items = getattr(result, "new_items", []) or []
+        for item in reversed(items):
+            if getattr(item, "type", None) == "message_output_item":
+                text = ItemHelpers.extract_last_text(item.raw_item)
+                if text:
+                    return text
+        return None
+
+    def _emit_model_usage(self, model: str, result) -> None:
+        if not self._battle_id:
+            return
+        usage = {"requests": 0, "input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+        for resp in getattr(result, "raw_responses", []) or []:
+            resp_usage = getattr(resp, "usage", None)
+            if not resp_usage:
+                continue
+            usage["requests"] += resp_usage.requests or 0
+            usage["input_tokens"] += resp_usage.input_tokens or 0
+            usage["output_tokens"] += resp_usage.output_tokens or 0
+            usage["total_tokens"] += resp_usage.total_tokens or 0
+
+        if usage["requests"] == 0:
+            return
+
+        insert_event(
+            self._battle_id,
+            event_type="model_usage",
+            team="system",
+            agent_name="Model Telemetry",
+            description=f"{model} usage",
+            details={"model": model, **usage},
+        )
+        asyncio.create_task(
+            self._event_sink(
+                {
+                    "type": "model_usage",
+                    "team": "system",
+                    "agent": "Model Telemetry",
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "data": {"model": model, **usage},
+                }
+            )
+        )
+
+    async def _blue_monitor_loop(self) -> None:
+        """Continuously monitor logs and block before exploit is called."""
+        last_since = None
+        while self._round_state and self._round_state.get("active"):
+            if self._round_state.get("winner"):
+                return
+            if self._round_state.get("exploit_called"):
+                await asyncio.sleep(1.5)
+                continue
+            try:
+                result = await asyncio.to_thread(get_recent_logs, last_since)
+                logs = result.get("logs", [])
+                if logs:
+                    last_since = logs[-1].get("timestamp") or last_since
+                if self._detect_attack_pattern(logs):
+                    await self._finalize_round("blue", "Blocked exploit based on log patterns", self._round_state["round"])
+                    return
+            except Exception:
+                pass
+            await asyncio.sleep(1.5)
+
+    def _detect_attack_pattern(self, logs: list[dict]) -> bool:
+        for log in logs:
+            path = (log.get("path") or "").lower()
+            query = (log.get("query") or "").lower()
+            body = (log.get("body") or "").lower()
+            joined = " ".join([path, query, body])
+            if "/api/products" in path and any(k in joined for k in ["union select", " or '1'='1", " or \"1\"=\"1", "sql", "select ", "sqli"]):
+                return True
+        return False
+
+    async def _finalize_round(self, winner: str, reason: str, round_index: int) -> None:
+        if not self._round_state or self._round_state.get("winner"):
+            return
+        self._round_state["winner"] = winner
+        if winner in ("red", "blue"):
+            delta = 100
+            if winner == "red":
+                scores = update_scores(self._battle_id, red_delta=delta)
+            else:
+                scores = update_scores(self._battle_id, blue_delta=delta)
+            await self._event_sink(
+                {
+                    "type": "score_update",
+                    "team": "system",
+                    "agent": "Game Master",
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "data": {
+                        "red_score": scores["red_score"],
+                        "blue_score": scores["blue_score"],
+                        "reason": f"Round {round_index} winner: {winner}",
+                    },
+                }
+            )
+
+        await self._event_sink(
+            {
+                "type": "round_end",
+                "team": "system",
+                "agent": "Battle Manager",
+                "timestamp": datetime.utcnow().isoformat(),
+                "data": {
+                    "round": round_index,
+                    "winner": winner,
+                    "reason": reason,
+                    "message": self._round_message(winner, round_index, reason),
+                },
+            }
+        )
+
+    def _round_message(self, winner: str, round_index: int, reason: str) -> str:
+        if winner == "red":
+            return f"ROUND {round_index}: RED TEAM DOMINATES — {reason}."
+        if winner == "blue":
+            return f"ROUND {round_index}: BLUE TEAM SHIELDS UP — {reason}."
+        return f"ROUND {round_index}: DRAW — {reason}."
+
+    def _output_failed(self, output: Any) -> bool:
+        if output is None:
+            return True
+        if isinstance(output, str):
+            lowered = output.lower()
+            return any(k in lowered for k in ["error", "exception", "traceback"])
+        if isinstance(output, dict):
+            if output.get("error"):
+                return True
+            status_code = output.get("status_code")
+            if isinstance(status_code, int) and status_code >= 400:
+                return True
+            if status_code == 0:
+                return True
+            body = output.get("body")
+            if isinstance(body, str) and "error" in body.lower():
+                return True
+        return False
+
+    def _exploit_succeeded(self, output: Any) -> bool:
+        if isinstance(output, dict):
+            if output.get("successful", 0) > 0:
+                return True
+            rate = output.get("success_rate")
+            if isinstance(rate, str) and rate.split("/")[0].isdigit():
+                try:
+                    return int(rate.split("/")[0]) > 0
+                except Exception:
+                    return False
+        return False

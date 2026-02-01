@@ -1,5 +1,6 @@
 import json
 import os
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -49,6 +50,18 @@ def _parse_json_arg(value: Optional[str]) -> Optional[Dict[str, Any]]:
         return json.loads(value)
     except Exception:
         return None
+
+
+def _with_retry(action, attempts: int = 2, delay: float = 0.3):
+    last_exc = None
+    for i in range(attempts):
+        try:
+            return action()
+        except Exception as exc:
+            last_exc = exc
+            if i < attempts - 1:
+                time.sleep(delay * (i + 1))
+    raise last_exc
 
 
 def _http_get_impl(url: str, params_json: Optional[str] = None, headers_json: Optional[str] = None) -> Dict[str, Any]:
@@ -139,28 +152,31 @@ def http_response_to_string(response: Dict[str, Any]) -> str:
 def _get_recent_logs_impl(since_timestamp: Optional[str] = None, limit: int = 10) -> Dict[str, Any]:
     """Fetch recent request logs from the sample app. OPTIMIZED: Returns only last 10 logs by default."""
     try:
-        resp = httpx.get(
-            f"{TARGET_URL}/internal/logs",
-            params={"since": since_timestamp} if since_timestamp else None,
-            timeout=5.0,
-        )
-        data = resp.json()
-        logs = data.get("logs", [])
+        def _do_request():
+            resp = httpx.get(
+                f"{TARGET_URL}/internal/logs",
+                params={"since": since_timestamp} if since_timestamp else None,
+                timeout=5.0,
+            )
+            data = resp.json()
+            logs = data.get("logs", [])
 
-        # OPTIMIZATION: Limit to last N logs to save tokens
-        if len(logs) > limit:
-            logs = logs[-limit:]
+            # OPTIMIZATION: Limit to last N logs to save tokens
+            if len(logs) > limit:
+                logs = logs[-limit:]
 
-        # OPTIMIZATION: Truncate each log entry
-        for log in logs:
-            if "path" in log and isinstance(log["path"], str):
-                log["path"] = log["path"][:100]
-            if "body" in log and isinstance(log["body"], str):
-                log["body"] = _truncate(log["body"], 50)
-            if "response" in log and isinstance(log["response"], str):
-                log["response"] = _truncate(log["response"], 50)
+            # OPTIMIZATION: Truncate each log entry
+            for log in logs:
+                if "path" in log and isinstance(log["path"], str):
+                    log["path"] = log["path"][:100]
+                if "body" in log and isinstance(log["body"], str):
+                    log["body"] = _truncate(log["body"], 50)
+                if "response" in log and isinstance(log["response"], str):
+                    log["response"] = _truncate(log["response"], 50)
 
-        return {"logs": logs, "total": len(logs), "truncated": len(data.get("logs", [])) > limit}
+            return {"logs": logs, "total": len(logs), "truncated": len(data.get("logs", [])) > limit}
+
+        return _with_retry(_do_request)
     except Exception as exc:
         return {"logs": [], "error": str(exc)}
 
@@ -168,29 +184,32 @@ def _get_recent_logs_impl(since_timestamp: Optional[str] = None, limit: int = 10
 def _get_source_file_impl(filename: str, max_lines: int = 100) -> Dict[str, Any]:
     """Fetch a source file from the sample app. OPTIMIZED: Returns max 100 lines by default."""
     try:
-        resp = httpx.get(
-            f"{TARGET_URL}/internal/source",
-            params={"filename": filename},
-            timeout=5.0,
-        )
-        data = resp.json()
-        content = data.get("content", "")
+        def _do_request():
+            resp = httpx.get(
+                f"{TARGET_URL}/internal/source",
+                params={"filename": filename},
+                timeout=5.0,
+            )
+            data = resp.json()
+            content = data.get("content", "")
 
-        # OPTIMIZATION: Truncate large files to save massive tokens
-        lines = content.split("\n")
-        if len(lines) > max_lines:
-            # Keep first 80% and last 20% for context
-            keep_start = int(max_lines * 0.8)
-            keep_end = max_lines - keep_start
-            lines = lines[:keep_start] + [f"\n... {len(lines) - max_lines} lines omitted ...\n"] + lines[-keep_end:]
-            content = "\n".join(lines)
+            # OPTIMIZATION: Truncate large files to save massive tokens
+            lines = content.split("\n")
+            if len(lines) > max_lines:
+                # Keep first 80% and last 20% for context
+                keep_start = int(max_lines * 0.8)
+                keep_end = max_lines - keep_start
+                lines = lines[:keep_start] + [f"\n... {len(lines) - max_lines} lines omitted ...\n"] + lines[-keep_end:]
+                content = "\n".join(lines)
 
-        return {
-            "filename": filename,
-            "content": content,
-            "total_lines": len(data.get("content", "").split("\n")),
-            "truncated": len(data.get("content", "").split("\n")) > max_lines
-        }
+            return {
+                "filename": filename,
+                "content": content,
+                "total_lines": len(data.get("content", "").split("\n")),
+                "truncated": len(data.get("content", "").split("\n")) > max_lines
+            }
+
+        return _with_retry(_do_request)
     except Exception as exc:
         return {"filename": filename, "content": "", "error": str(exc)}
 
@@ -221,15 +240,18 @@ def _apply_unidiff(original_text: str, diff_text: str) -> str:
 def _apply_patch_impl(filename: str, diff: str) -> Dict[str, Any]:
     """Apply a unified diff to a sample app file and reload it via /internal/reload."""
     try:
-        source = _get_source_file_impl(filename)
-        original = source.get("content", "")
-        updated = _apply_unidiff(original, diff)
-        resp = httpx.post(
-            f"{TARGET_URL}/internal/reload",
-            json={"filename": filename, "content": updated},
-            timeout=5.0,
-        )
-        return {"status_code": resp.status_code, "body": _truncate(resp.text)}
+        def _do_request():
+            source = _get_source_file_impl(filename)
+            original = source.get("content", "")
+            updated = _apply_unidiff(original, diff)
+            resp = httpx.post(
+                f"{TARGET_URL}/internal/reload",
+                json={"filename": filename, "content": updated},
+                timeout=5.0,
+            )
+            return {"status_code": resp.status_code, "body": _truncate(resp.text)}
+
+        return _with_retry(_do_request)
     except Exception as exc:
         return {"status_code": 0, "body": f"error: {exc}"}
 

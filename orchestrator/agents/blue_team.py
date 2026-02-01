@@ -11,11 +11,16 @@ except ModuleNotFoundError:
     from agents.tools import apply_patch, get_recent_logs, get_source_file
 
 
-SOC_INSTRUCTIONS = "Check logs. Report attacks."
+SOC_INSTRUCTIONS = "Check recent logs for attack indicators. Summarize confirmed attack paths."
 
-PATCH_DEV_INSTRUCTIONS = "Patch vulns."
+PATCH_DEV_INSTRUCTIONS = "Patch vulnerabilities in sample-app/app.py only."
 
-COMMANDER_INSTRUCTIONS_FLAT = "Check logs. Patch code."
+COMMANDER_INSTRUCTIONS_FLAT = """You are the Blue Team Commander.
+1) Call get_recent_logs() first.
+2) If you see attack traffic, call get_source_file(filename="app.py") (not app.js/index.html).
+3) Propose a minimal patch, then call apply_patch(filename="app.py", diff=...).
+Return brief bullet steps + what you patched.
+If a tool returns an error, retry once before moving on."""
 
 COMMANDER_INSTRUCTIONS_HIERARCHICAL = "Run SOC→Patch. Brief bullets."
 
