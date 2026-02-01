@@ -36,6 +36,8 @@
       .btn-cyan { color: var(--cyan); }
       .btn-green { color: var(--green); }
       .tag { border: 1px solid var(--border); padding: 2px 6px; font-size: 10px; letter-spacing: 0.08em; }
+      .cursor-pointer { cursor: pointer; }
+      .hover\:border-slate-600:hover { border-color: #475569; }
     </style>
   </head>
   <body class="min-h-screen">
@@ -79,6 +81,7 @@
         const [redView, setRedView] = useState('strategy');
         const [blueView, setBlueView] = useState('strategy');
         const [vulns, setVulns] = useState([]);
+        const [parsedVulns, setParsedVulns] = useState([]);
         const [timer, setTimer] = useState(0);
         const [lastRedEventAt, setLastRedEventAt] = useState(0);
         const [lastBlueEventAt, setLastBlueEventAt] = useState(0);
@@ -86,6 +89,8 @@
         const [battles, setBattles] = useState([]);
         const [loadingStatus, setLoadingStatus] = useState(true);
         const [activeBattle, setActiveBattle] = useState(null);
+        const [expandedEvents, setExpandedEvents] = useState(new Set());
+        const [portInfo, setPortInfo] = useState(null);
         const wsRef = useRef(null);
 
         const redScoreDisplay = useCountUp(redScore);
@@ -111,6 +116,37 @@
             if (evt.type === 'score_update') {
               setRedScore(evt.data.red_score || 0);
               setBlueScore(evt.data.blue_score || 0);
+            }
+
+            // Parse port discovery info
+            if (evt.data?.description?.includes('Port scan complete')) {
+              const match = evt.data.description.match(/(\d+) ports open, testing (\d+) endpoints/);
+              if (match) {
+                setPortInfo({ ports: parseInt(match[1]), endpoints: parseInt(match[2]) });
+              }
+            }
+
+            // Parse vulnerability findings
+            if (evt.type === 'attack_detected' && evt.data?.description) {
+              const desc = evt.data.description;
+              let severity = 'medium';
+              if (desc.includes('🔴 CRITICAL')) severity = 'critical';
+              else if (desc.includes('🟠 HIGH')) severity = 'high';
+
+              const urlMatch = desc.match(/(https?:\/\/[^\s]+)/);
+              const typeMatch = desc.match(/(?:CRITICAL|HIGH):\s+([^at]+)/);
+
+              setParsedVulns((prev) => [
+                ...prev,
+                {
+                  id: Date.now() + Math.random(),
+                  severity,
+                  type: typeMatch ? typeMatch[1].trim() : 'Unknown',
+                  url: urlMatch ? urlMatch[1] : '',
+                  timestamp: evt.timestamp,
+                  description: desc
+                }
+              ]);
             }
 
             if (evt.team === 'red') {
@@ -147,6 +183,36 @@
               const feed = past.filter((e) =>
                 e.type === 'battle_event' || e.type === 'patch_applied' || e.type === 'attack_detected'
               );
+
+              // Parse historical vulnerabilities
+              const vulnEvents = past.filter(e => e.type === 'attack_detected' && e.data?.description);
+              const historicalVulns = vulnEvents.map((evt, idx) => {
+                const desc = evt.data.description;
+                let severity = 'medium';
+                if (desc.includes('🔴 CRITICAL')) severity = 'critical';
+                else if (desc.includes('🟠 HIGH')) severity = 'high';
+                const urlMatch = desc.match(/(https?:\/\/[^\s]+)/);
+                const typeMatch = desc.match(/(?:CRITICAL|HIGH):\s+([^at]+)/);
+                return {
+                  id: `hist-${idx}`,
+                  severity,
+                  type: typeMatch ? typeMatch[1].trim() : 'Unknown',
+                  url: urlMatch ? urlMatch[1] : '',
+                  timestamp: evt.timestamp,
+                  description: desc
+                };
+              });
+              setParsedVulns(historicalVulns);
+
+              // Parse port info
+              const portEvent = past.find(e => e.data?.description?.includes('Port scan complete'));
+              if (portEvent) {
+                const match = portEvent.data.description.match(/(\d+) ports open, testing (\d+) endpoints/);
+                if (match) {
+                  setPortInfo({ ports: parseInt(match[1]), endpoints: parseInt(match[2]) });
+                }
+              }
+
               setEvents(past);
               setRedLog(past.filter((e) => e.team === 'red'));
               setBlueLog(past.filter((e) => e.team === 'blue'));
@@ -184,6 +250,8 @@
           setBattleFeed([]);
           setRedLog([]);
           setBlueLog([]);
+          setParsedVulns([]);
+          setPortInfo(null);
         };
         const startMockBattle = async () => {
           const res = await fetch('/api/battle/start?mode=mock', { method: 'POST' });
@@ -197,6 +265,8 @@
           setBattleFeed([]);
           setRedLog([]);
           setBlueLog([]);
+          setParsedVulns([]);
+          setPortInfo(null);
         };
 
         const stopBattle = async () => {
@@ -228,6 +298,36 @@
             timestamp: e.timestamp,
             data: e.details || { description: e.description },
           }));
+
+          // Parse historical vulnerabilities
+          const vulnEvents = past.filter(e => e.type === 'attack_detected' && e.data?.description);
+          const historicalVulns = vulnEvents.map((evt, idx) => {
+            const desc = evt.data.description;
+            let severity = 'medium';
+            if (desc.includes('🔴 CRITICAL')) severity = 'critical';
+            else if (desc.includes('🟠 HIGH')) severity = 'high';
+            const urlMatch = desc.match(/(https?:\/\/[^\s]+)/);
+            const typeMatch = desc.match(/(?:CRITICAL|HIGH):\s+([^at]+)/);
+            return {
+              id: `hist-${idx}`,
+              severity,
+              type: typeMatch ? typeMatch[1].trim() : 'Unknown',
+              url: urlMatch ? urlMatch[1] : '',
+              timestamp: evt.timestamp,
+              description: desc
+            };
+          });
+          setParsedVulns(historicalVulns);
+
+          // Parse port info
+          const portEvent = past.find(e => e.data?.description?.includes('Port scan complete'));
+          if (portEvent) {
+            const match = portEvent.data.description.match(/(\d+) ports open, testing (\d+) endpoints/);
+            if (match) {
+              setPortInfo({ ports: parseInt(match[1]), endpoints: parseInt(match[2]) });
+            }
+          }
+
           setBattleId(id);
           setPhase('battle');
           setActiveBattle({ id });
@@ -259,10 +359,33 @@
         ]);
 
         const filterLog = (log, view) => {
+          if (view === 'all') {
+            return log;
+          }
           if (view === 'details') {
             return log.filter((e) => e.type === 'tool_call' || e.type === 'tool_result');
           }
           return log.filter((e) => strategyTypes.has(e.type));
+        };
+
+        const groupToolEvents = (events) => {
+          const grouped = [];
+          let i = 0;
+          while (i < events.length) {
+            const current = events[i];
+            if (current.type === 'tool_call' && i + 1 < events.length && events[i + 1].type === 'tool_result') {
+              grouped.push({
+                ...current,
+                isGrouped: true,
+                toolResult: events[i + 1],
+              });
+              i += 2;
+            } else {
+              grouped.push(current);
+              i += 1;
+            }
+          }
+          return grouped;
         };
 
         const renderLogText = (e) => {
@@ -273,6 +396,166 @@
             return `← ${e.data?.output || ''}`;
           }
           return e.data?.text || e.data?.description || e.type;
+        };
+
+        const toggleEvent = (eventId) => {
+          setExpandedEvents((prev) => {
+            const next = new Set(prev);
+            if (next.has(eventId)) {
+              next.delete(eventId);
+            } else {
+              next.add(eventId);
+            }
+            return next;
+          });
+        };
+
+        const getEventIcon = (type) => {
+          const icons = {
+            'agent_thinking': '🧠',
+            'tool_call': '🔧',
+            'tool_result': '📊',
+            'battle_event': '⚔️',
+            'attack_detected': '🚨',
+            'patch_applied': '🛡️',
+            'score_update': '🎯',
+            'battle_start': '🎬',
+            'battle_end': '🏁',
+          };
+          return icons[type] || '📝';
+        };
+
+        const getEventColor = (type, team) => {
+          if (team === 'red') return 'var(--red)';
+          if (team === 'blue') return 'var(--cyan)';
+          if (type === 'attack_detected') return 'var(--red)';
+          if (type === 'patch_applied') return 'var(--green)';
+          if (type === 'score_update') return 'var(--green)';
+          return 'var(--text)';
+        };
+
+        const renderDetailedEvent = (e, eventId, isExpanded) => {
+          const color = getEventColor(e.type, e.team);
+          const icon = getEventIcon(e.type);
+          const displayType = e.isGrouped ? 'TOOL EXECUTION' : e.type.replace(/_/g, ' ').toUpperCase();
+
+          return h(
+            'div',
+            {
+              key: eventId,
+              className: 'event-entry mb-2 panel p-2 cursor-pointer hover:border-slate-600',
+              onClick: () => toggleEvent(eventId),
+            },
+            h(
+              'div',
+              { className: 'flex items-start justify-between' },
+              h(
+                'div',
+                { className: 'flex-1' },
+                h(
+                  'div',
+                  { className: 'flex items-center gap-2' },
+                  h('span', { className: 'text-lg' }, icon),
+                  h(
+                    'span',
+                    { className: 'text-[10px] text-slate-400' },
+                    `[${e.timestamp?.substring(11, 19) || ''}] ${e.agent || 'Agent'}`
+                  ),
+                  h(
+                    'span',
+                    { className: 'tag ml-2', style: { color } },
+                    displayType
+                  )
+                ),
+                h(
+                  'div',
+                  { className: 'mt-1 text-xs', style: { color } },
+                  e.isGrouped
+                    ? `${e.data?.tool || 'tool'} → ${String(e.toolResult?.data?.output || 'result').substring(0, 50)}...`
+                    : e.data?.description || (e.data?.text ? String(e.data.text).substring(0, 100) : e.type)
+                )
+              ),
+              h(
+                'div',
+                { className: 'text-slate-400 ml-2' },
+                isExpanded ? '▼' : '▶'
+              )
+            ),
+            isExpanded
+              ? h(
+                  'div',
+                  { className: 'mt-2 pt-2 border-t border-slate-700 text-[10px]' },
+                  e.isGrouped
+                    ? h(
+                        'div',
+                        null,
+                        h('div', { className: 'text-slate-400 mb-1' }, 'TOOL:'),
+                        h('div', { className: 'text-cyan-400 mb-2' }, e.data?.tool || 'unknown'),
+                        h('div', { className: 'text-slate-400 mb-1' }, 'ARGUMENTS:'),
+                        h(
+                          'pre',
+                          { className: 'bg-slate-900 p-2 rounded overflow-x-auto mb-3' },
+                          JSON.stringify(e.data?.args || {}, null, 2)
+                        ),
+                        h('div', { className: 'text-slate-400 mb-1 mt-3' }, 'OUTPUT:'),
+                        h(
+                          'pre',
+                          { className: 'bg-slate-900 p-2 rounded overflow-x-auto max-h-[200px]' },
+                          typeof e.toolResult?.data?.output === 'string'
+                            ? e.toolResult.data.output
+                            : JSON.stringify(e.toolResult?.data?.output || {}, null, 2)
+                        )
+                      )
+                    : e.type === 'tool_call'
+                    ? h(
+                        'div',
+                        null,
+                        h('div', { className: 'text-slate-400 mb-1' }, 'TOOL:'),
+                        h('div', { className: 'text-cyan-400 mb-2' }, e.data?.tool || 'unknown'),
+                        h('div', { className: 'text-slate-400 mb-1' }, 'ARGUMENTS:'),
+                        h(
+                          'pre',
+                          { className: 'bg-slate-900 p-2 rounded overflow-x-auto' },
+                          JSON.stringify(e.data?.args || {}, null, 2)
+                        )
+                      )
+                    : e.type === 'tool_result'
+                    ? h(
+                        'div',
+                        null,
+                        h('div', { className: 'text-slate-400 mb-1' }, 'OUTPUT:'),
+                        h(
+                          'pre',
+                          { className: 'bg-slate-900 p-2 rounded overflow-x-auto max-h-[200px]' },
+                          typeof e.data?.output === 'string'
+                            ? e.data.output
+                            : JSON.stringify(e.data?.output || {}, null, 2)
+                        )
+                      )
+                    : e.type === 'agent_thinking'
+                    ? h(
+                        'div',
+                        null,
+                        h('div', { className: 'text-slate-400 mb-1' }, 'THINKING:'),
+                        h(
+                          'div',
+                          { className: 'bg-slate-900 p-2 rounded' },
+                          e.data?.text || ''
+                        )
+                      )
+                    : h(
+                        'div',
+                        null,
+                        h('div', { className: 'text-slate-400 mb-1' }, 'DETAILS:'),
+                        h(
+                          'pre',
+                          { className: 'bg-slate-900 p-2 rounded overflow-x-auto max-h-[200px]' },
+                          JSON.stringify(e.data || {}, null, 2)
+                        )
+                      )
+                )
+              : null
+          );
         };
 
         if (phase === 'pre') {
@@ -501,22 +784,20 @@
               h('div', { className: 'panel-title text-xs text-slate-400' }, 'RED TEAM'),
               h(
                 'div',
-                { className: 'mt-2 flex gap-2 text-xs' },
+                { className: 'mt-2 flex gap-2 text-xs flex-wrap' },
                 h('button', { className: 'btn btn-red', onClick: () => setRedView('strategy') }, 'Strategy'),
-                h('button', { className: 'btn btn-red', onClick: () => setRedView('details') }, 'Details')
+                h('button', { className: 'btn btn-red', onClick: () => setRedView('details') }, 'Tools'),
+                h('button', { className: 'btn btn-red', onClick: () => setRedView('all') }, 'All')
               ),
               h(
                 'div',
                 { className: 'mt-4 h-[420px] overflow-y-auto text-xs' },
                 ...(filterLog(redLog, redView).length
-                  ? filterLog(redLog, redView).map((e, i) =>
-                  h(
-                    'div',
-                    { key: i, className: 'event-entry mb-2' },
-                    h('div', { className: 'text-slate-400' }, `[${e.timestamp}] ${e.agent}`),
-                    h('div', { style: { color: 'var(--red)' } }, renderLogText(e))
-                  )
-                )
+                  ? groupToolEvents(filterLog(redLog, redView)).map((e, i) => {
+                      const eventId = `red-${i}-${e.timestamp}`;
+                      const isExpanded = expandedEvents.has(eventId);
+                      return renderDetailedEvent(e, eventId, isExpanded);
+                    })
                   : [h('div', { key: 'empty', className: 'text-slate-400' }, 'Awaiting Red Team events...')])
               )
             ),
@@ -558,22 +839,20 @@
               h('div', { className: 'panel-title text-xs text-slate-400' }, 'BLUE TEAM'),
               h(
                 'div',
-                { className: 'mt-2 flex gap-2 text-xs' },
+                { className: 'mt-2 flex gap-2 text-xs flex-wrap' },
                 h('button', { className: 'btn btn-cyan', onClick: () => setBlueView('strategy') }, 'Strategy'),
-                h('button', { className: 'btn btn-cyan', onClick: () => setBlueView('details') }, 'Details')
+                h('button', { className: 'btn btn-cyan', onClick: () => setBlueView('details') }, 'Tools'),
+                h('button', { className: 'btn btn-cyan', onClick: () => setBlueView('all') }, 'All')
               ),
               h(
                 'div',
                 { className: 'mt-4 h-[420px] overflow-y-auto text-xs' },
                 ...(filterLog(blueLog, blueView).length
-                  ? filterLog(blueLog, blueView).map((e, i) =>
-                  h(
-                    'div',
-                    { key: i, className: 'event-entry mb-2' },
-                    h('div', { className: 'text-slate-400' }, `[${e.timestamp}] ${e.agent}`),
-                    h('div', { style: { color: 'var(--cyan)' } }, renderLogText(e))
-                  )
-                )
+                  ? groupToolEvents(filterLog(blueLog, blueView)).map((e, i) => {
+                      const eventId = `blue-${i}-${e.timestamp}`;
+                      const isExpanded = expandedEvents.has(eventId);
+                      return renderDetailedEvent(e, eventId, isExpanded);
+                    })
                   : [h('div', { key: 'empty', className: 'text-slate-400' }, 'Awaiting Blue Team events...')])
               )
             )
@@ -581,23 +860,56 @@
           h(
             'div',
             { className: 'panel p-4 mt-4' },
-            h('div', { className: 'panel-title text-xs text-slate-400' }, 'VULNERABILITIES BOARD'),
-            h(
-              'div',
-              { className: 'mt-4 grid grid-cols-1 md:grid-cols-5 gap-2 text-xs' },
-              ...vulns.map((v) => {
-                let color = '#475569';
-                if (v.status === 'found') color = 'var(--red)';
-                if (v.status === 'exploited') color = 'var(--red)';
-                if (v.status === 'patched') color = 'var(--green)';
-                return h(
+            h('div', { className: 'panel-title text-xs text-slate-400 flex items-center justify-between' },
+              h('span', null, 'VULNERABILITIES DISCOVERED'),
+              portInfo ? h('span', { className: 'text-[10px]' },
+                `${portInfo.ports} ports open • ${portInfo.endpoints} endpoints tested`) : null
+            ),
+            parsedVulns.length > 0
+              ? h(
                   'div',
-                  { key: v.id, className: 'panel p-2' },
-                  h('div', { className: 'text-slate-400' }, v.name),
-                  h('div', { className: 'mt-2', style: { color } }, String(v.status || 'unknown').toUpperCase())
-                );
-              })
-            )
+                  { className: 'mt-4 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 text-xs' },
+                  ...parsedVulns.map((v) => {
+                    const severityColors = {
+                      critical: { bg: 'rgba(239, 68, 68, 0.1)', border: 'var(--red)', text: 'var(--red)' },
+                      high: { bg: 'rgba(251, 146, 60, 0.1)', border: '#fb923c', text: '#fb923c' },
+                      medium: { bg: 'rgba(250, 204, 21, 0.1)', border: '#facc15', text: '#facc15' }
+                    };
+                    const colors = severityColors[v.severity] || severityColors.medium;
+
+                    return h(
+                      'div',
+                      {
+                        key: v.id,
+                        className: 'panel p-3',
+                        style: {
+                          backgroundColor: colors.bg,
+                          borderColor: colors.border,
+                          borderWidth: '1px'
+                        }
+                      },
+                      h(
+                        'div',
+                        { className: 'flex items-start justify-between mb-2' },
+                        h('span', {
+                          className: 'text-[10px] font-bold',
+                          style: { color: colors.text }
+                        }, v.severity.toUpperCase()),
+                        h('span', { className: 'text-[9px] text-slate-400' },
+                          v.timestamp ? new Date(v.timestamp).toLocaleTimeString() : '')
+                      ),
+                      h('div', { className: 'font-semibold mb-2', style: { color: colors.text } }, v.type),
+                      v.url ? h('div', { className: 'text-[10px] text-slate-300 break-all mb-1' }, v.url) : null,
+                      h('div', { className: 'text-[10px] text-slate-400 mt-2' },
+                        v.description.replace(/🔴|🟠|CRITICAL:|HIGH:/g, '').trim().substring(0, 100))
+                    );
+                  })
+                )
+              : h(
+                  'div',
+                  { className: 'mt-4 text-slate-400 text-xs text-center p-4' },
+                  'No vulnerabilities detected yet. Scanning in progress...'
+                )
           )
         );
       }
