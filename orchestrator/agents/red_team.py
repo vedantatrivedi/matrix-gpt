@@ -40,17 +40,18 @@ STEP 3: Return JSON summary:
   ]
 }
 
-CRITICAL REMINDER: CALL THE TOOLS. DO NOT JUST WRITE A REPORT. USE exploit_vulnerability() NOW."""
+CRITICAL REMINDER: CALL THE TOOLS. DO NOT JUST WRITE A REPORT. USE exploit_vulnerability() NOW.
+If a tool returns an error, retry once with corrected arguments before moving on."""
 
 COMMANDER_INSTRUCTIONS_HIERARCHICAL = "Run: recon→hunt→exploit. Brief bullets."
 
 
 RUN_MODE = os.environ.get("RUN_MODE", "demo")
 # OPTIMIZATION: Use cheapest model to save tokens
-MODEL = os.environ.get("RED_TEAM_MODEL", "codex-mini-latest")
-RECON_MODEL = os.environ.get("RECON_MODEL", "codex-mini-latest")
-HUNTER_MODEL = os.environ.get("VULN_HUNTER_MODEL", "codex-mini-latest")
-EXPLOIT_MODEL = os.environ.get("EXPLOIT_MODEL", "codex-mini-latest")
+MODEL = os.environ.get("RED_TEAM_MODEL", "gpt-4o-mini")
+RECON_MODEL = os.environ.get("RECON_MODEL", "gpt-4o-mini")
+HUNTER_MODEL = os.environ.get("VULN_HUNTER_MODEL", "gpt-4o-mini")
+EXPLOIT_MODEL = os.environ.get("EXPLOIT_MODEL", "gpt-4o-mini")
 
 # CONFIGURATION: Set to 'true' for hierarchical mode (requires higher rate limits)
 # Set to 'false' for flat mode (works with free tier 3 RPM)
