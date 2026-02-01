@@ -50,8 +50,6 @@ MatrixGPT is an autonomous adversarial security war game. Eight AI Red Team spec
 
 ## Attack & Defence Cycle
 
-![Attack & Defence Cycle](docs/flow_diagram.svg)
-
 This seven-step loop repeats continuously for the duration of the battle. Steps 1–3 are the Red Team attack phase. Step 4 is Blue Team detection. Steps 5–6 are remediation. Step 7 scores the round and feeds back into the next iteration. When Blue Team patches a vulnerability, the same exploit vector genuinely stops working on the next Red Team attempt — judges can watch this happen in real time on the vulnerability board.
 
 ---
