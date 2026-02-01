@@ -19,8 +19,8 @@ AI Red Team agents attack. AI Blue Team agents defend. The war is live.
 ![Track](https://img.shields.io/badge/Track-Multi%20Agent%20Systems%20%26%20Workflows-6366f1?style=flat-square&labelColor=0f172a)
 ![Language](https://img.shields.io/badge/Python-3.11%2B-3b82f6?style=flat-square&labelColor=0f172a)
 ![Orchestration](https://img.shields.io/badge/OpenAI-Agents%20SDK-10b981?style=flat-square&labelColor=0f172a)
-![Model](https://img.shields.io/badge/Model-GPT%204.1-8b5cf6?style=flat-square&labelColor=0f172a)
-![Hosting](https://img.shields.io/badge/Hosting-Railway-22c55e?style=flat-square&labelColor=0f172a)
+![Model](https://img.shields.io/badge/Model-GPT%205.2-8b5cf6?style=flat-square&labelColor=0f172a)
+
 
 </div>
 
@@ -45,14 +45,6 @@ AI Red Team agents attack. AI Blue Team agents defend. The war is live.
 ## What It Does
 
 MatrixGPT is an autonomous adversarial security war game. Eight AI Red Team specialist agents attack a live web application through real HTTP requests — discovering vulnerabilities, crafting exploit chains, and exfiltrating data. Eight AI Blue Team specialist agents defend in parallel — monitoring request logs, detecting attacks, and deploying working code patches directly to the running application. A neutral Game Master scores every move and enforces safety rules. The entire battle plays out in real time on a military command-center dashboard, with zero human intervention required after you press START.
-
----
-
-## System Architecture
-
-![System Architecture](docs/arch_diagram.svg)
-
-Three independently hosted services coordinate over private networking. The **Orchestrator** runs all agent loops and streams every event — agent reasoning, tool calls, tool results, score updates — through a WebSocket to the React frontend. The **Sample App** is the live attack target; Blue Team patches are hot-reloaded into it mid-battle via an internal reload endpoint. The **Game Master** scores every event and blocks any action that violates safety rules (no data deletion, no external requests).
 
 ---
 
@@ -118,12 +110,11 @@ The Sample App ships with ten real, exploitable vulnerabilities. Every one can b
 | Layer | Technology |
 |---|---|
 | Agent orchestration | OpenAI Agents SDK (`openai-agents`) |
-| LLM | GPT-4.1 (agents) · GPT-4.1-mini (Game Master) |
+| LLM | GPT-5.2-codex (agents) · GPT-5.2-codex (Game Master) |
 | Backend | Python 3.11 · FastAPI · Uvicorn |
 | Real-time transport | WebSockets (FastAPI native) |
 | Frontend | React (CDN, no build step) · single `index.html` |
 | Database | SQLite (zero-config, single file) |
-| Hosting | Railway (3 services, private networking) |
 | HTTP client | `httpx` (async) |
 
 ---
@@ -133,7 +124,7 @@ The Sample App ships with ten real, exploitable vulnerabilities. Every one can b
 ### Prerequisites
 
 - Python 3.11+
-- An OpenAI API key with access to GPT-4.1
+- An OpenAI API key with access to GPT-5.2
 
 ### Local Development
 
@@ -165,16 +156,6 @@ pytest tests/ -v
 
 Once both servers are running, open **`http://localhost:8000`** in your browser.
 
-### Railway Deployment (Production)
-
-1. Fork or push this repo to GitHub.
-2. Go to [Railway](https://railway.app) → **New Project → Deploy from GitHub repo**.
-3. Railway auto-detects the three `railway.json` files and creates three services.
-4. Set the `OPENAI_API_KEY` environment variable on the **Orchestrator** service.
-5. Railway wires the private-network `TARGET_URL` automatically via variable references.
-6. Wait for all three services to show green. Open the Orchestrator's public URL.
-
-> **Note:** Railway's private network is IPv6-only. Both Dockerfiles bind to `::` for this reason.
 
 ---
 
@@ -200,15 +181,12 @@ Once both servers are running, open **`http://localhost:8000`** in your browser.
 
 ---
 
-## Submission Write-Ups
 
-These are pre-drafted to fit the 500-character limits. Copy directly into the submission form.
-
-### Project Write-Up *(455 characters)*
+### About the Project
 
 > MatrixGPT is an autonomous adversarial security war game: AI Red Team agents attack a web application via real HTTP requests while AI Blue Team agents detect intrusions and deploy live code patches — all without human intervention. Built with OpenAI Agents SDK, 8 specialist agents per side coordinate attack chains, log analysis, and surgical vulnerability fixes in a continuous real-time loop visible through a military-style command-center dashboard.
 
-### How We Used OpenAI Models, APIs & Tools *(399 characters)*
+### How We Used OpenAI Models, APIs & Tools
 
 > We use GPT-4.1 for all 8 Red and Blue Team agents via the OpenAI Agents SDK, leveraging agents-as-tools orchestration for commander→specialist delegation and Runner.run_streamed() for real-time event streaming to our WebSocket frontend. GPT-4.1-mini powers the Game Master scorer for low-latency rule enforcement. All agent tool calls execute real HTTP requests and code patches — no simulation.
 
@@ -226,60 +204,15 @@ These are pre-drafted to fit the 500-character limits. Copy directly into the su
 
 ---
 
-## Project Structure
-
-```
-.
-├── orchestrator/                  # Agent backend + WebSocket server + frontend
-│   ├── main.py                    # FastAPI app, WebSocket endpoint, static file serving
-│   ├── agents/
-│   │   ├── red_team.py            # Red Team Commander + specialist agents
-│   │   ├── blue_team.py           # Blue Team Commander + specialist agents
-│   │   ├── game_master.py         # Scoring logic + safety rules
-│   │   └── tools.py               # Shared HTTP + patch tools
-│   ├── battle_manager.py          # Async battle loop, event routing
-│   ├── db.py                      # SQLite schema + queries
-│   ├── frontend/
-│   │   └── index.html             # Self-contained React dashboard (no build step)
-│   ├── tests/                     # pytest suite
-│   │   ├── test_sample_app.py     # Verifies all 10 vulns are exploitable
-│   │   ├── test_agents.py         # Unit tests for agent tools
-│   │   ├── test_game_master.py    # Scoring + safety rule tests
-│   │   └── test_battle_manager.py # Integration tests
-│   ├── requirements.txt
-│   ├── Dockerfile
-│   └── railway.json
-├── sample-app/                    # The vulnerable target application
-│   ├── app.py                     # FastAPI routes (with planted vulnerabilities)
-│   ├── database.py                # SQLite seed data
-│   ├── requirements.txt
-│   ├── Dockerfile
-│   └── railway.json
-├── docs/
-│   ├── arch_diagram.svg           # System architecture diagram
-│   └── flow_diagram.svg           # Attack & defence cycle diagram
-├── .env.example                   # Required environment variables
-└── README.md                      # This file
-```
-
----
-
 ## Team
 
 <!-- TODO: Fill in team details -->
 
-| Name | Role |
+
+| Name | LinkedIn |
 |---|---|
-| *[Name]* | *[Role]* |
-| *[Name]* | *[Role]* |
-
----
-
-## Deployed Prototype
-
-<!-- TODO: Add Railway URL once deployed -->
-
-> 🚀 *[Insert Railway public URL here]*
+| Vedanta Trivedi | [Profile](https://www.linkedin.com/in/vedantatrivedi/) |
+| Jinit Shah | [Profile](https://www.linkedin.com/in/jinit24) |
 
 ---
 
