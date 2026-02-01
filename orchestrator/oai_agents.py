@@ -24,4 +24,19 @@ _sdk = _import_sdk()
 
 Agent = _sdk.Agent
 Runner = _sdk.Runner
-function_tool = _sdk.function_tool
+
+# Wrap function_tool to disable strict schemas (workaround for Dict[str, Any] issues)
+def function_tool(func=None, **kwargs):
+    """Wrapper for function_tool that disables strict schemas by default"""
+    # Set strict_mode=False by default unless explicitly provided
+    if 'strict_mode' not in kwargs:
+        kwargs['strict_mode'] = False
+
+    if func is None:
+        # Called with arguments: @function_tool(...)
+        def decorator(f):
+            return _sdk.function_tool(f, **kwargs)
+        return decorator
+    else:
+        # Called without arguments: @function_tool
+        return _sdk.function_tool(func, **kwargs)
