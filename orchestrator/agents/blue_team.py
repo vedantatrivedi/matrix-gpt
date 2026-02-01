@@ -11,43 +11,65 @@ except ModuleNotFoundError:
     from agents.tools import apply_patch, get_recent_logs, get_source_file
 
 
-SOC_INSTRUCTIONS = "Scan logs for attacks. Report type and evidence. Brief."
+SOC_INSTRUCTIONS = "Check logs. Report attacks."
 
-PATCH_DEV_INSTRUCTIONS = "Create unified diff patch. Brief summary."
+PATCH_DEV_INSTRUCTIONS = "Patch vulns."
 
-COMMANDER_INSTRUCTIONS = "Run SOC→Patch. Brief bullets."
+COMMANDER_INSTRUCTIONS_FLAT = "Check logs. Patch code."
+
+COMMANDER_INSTRUCTIONS_HIERARCHICAL = "Run SOC→Patch. Brief bullets."
 
 
 RUN_MODE = os.environ.get("RUN_MODE", "demo")
 # OPTIMIZATION: Use cheapest model to save tokens
-MODEL = os.environ.get("BLUE_TEAM_MODEL", "gpt-4o-mini")
-SOC_MODEL = os.environ.get("SOC_MODEL", "gpt-4o-mini")
-PATCH_MODEL = os.environ.get("PATCH_MODEL", "gpt-4o-mini")
+MODEL = os.environ.get("BLUE_TEAM_MODEL", "gpt-3.5-turbo")
+SOC_MODEL = os.environ.get("SOC_MODEL", "gpt-3.5-turbo")
+PATCH_MODEL = os.environ.get("PATCH_MODEL", "gpt-3.5-turbo")
 
+# CONFIGURATION: Set to 'true' for hierarchical mode (requires higher rate limits)
+# Set to 'false' for flat mode (works with free tier 3 RPM)
+USE_HIERARCHICAL = os.environ.get("USE_HIERARCHICAL_AGENTS", "false").lower() == "true"
 
-soc_monitor = Agent(
-    name="SOC Monitor",
-    model=SOC_MODEL,
-    instructions=SOC_INSTRUCTIONS,
-    tools=[get_recent_logs],
-)
+if USE_HIERARCHICAL:
+    # HIERARCHICAL MODE: Commander with sub-agents (requires paid tier)
+    # Makes 3+ API calls: Commander → SOC → Patch
+    soc_monitor = Agent(
+        name="SOC Monitor",
+        model=SOC_MODEL,
+        instructions=SOC_INSTRUCTIONS,
+        tools=[get_recent_logs],
+    )
 
-patch_developer = Agent(
-    name="Patch Developer",
-    model=PATCH_MODEL,
-    instructions=PATCH_DEV_INSTRUCTIONS,
-    tools=[get_source_file],
-)
+    patch_developer = Agent(
+        name="Patch Developer",
+        model=PATCH_MODEL,
+        instructions=PATCH_DEV_INSTRUCTIONS,
+        tools=[get_source_file],
+    )
 
-blue_team_commander = Agent(
-    name="Blue Team Commander",
-    model=MODEL,
-    instructions=COMMANDER_INSTRUCTIONS,
-    tools=[
-        soc_monitor.as_tool(tool_name="soc_monitor", tool_description="Analyze logs"),
-        patch_developer.as_tool(
-            tool_name="patch_developer", tool_description="Generate patch"
-        ),
-        apply_patch,
-    ],
-)
+    blue_team_commander = Agent(
+        name="Blue Team Commander",
+        model=MODEL,
+        instructions=COMMANDER_INSTRUCTIONS_HIERARCHICAL,
+        tools=[
+            soc_monitor.as_tool(tool_name="soc_monitor", tool_description="Analyze logs"),
+            patch_developer.as_tool(
+                tool_name="patch_developer", tool_description="Generate patch"
+            ),
+            apply_patch,
+        ],
+    )
+else:
+    # FLAT MODE: Single agent with all tools (free tier compatible)
+    # Makes only 1 API call with direct tool access
+    blue_team_commander = Agent(
+        name="Blue Team Commander",
+        model=MODEL,
+        instructions=COMMANDER_INSTRUCTIONS_FLAT,
+        tools=[
+            # Direct access to all tools (no sub-agents)
+            get_recent_logs,
+            get_source_file,
+            apply_patch,
+        ],
+    )
