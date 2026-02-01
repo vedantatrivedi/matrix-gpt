@@ -63,10 +63,16 @@ def init_db():
             method TEXT,
             path TEXT,
             query TEXT,
-            body TEXT
+            body TEXT,
+            ip TEXT
         );
         """
     )
+    # Backfill column for existing DBs
+    try:
+        cur.execute("ALTER TABLE request_logs ADD COLUMN ip TEXT")
+    except Exception:
+        pass
     conn.commit()
 
     cur.execute("SELECT COUNT(*) as c FROM users")

@@ -27,6 +27,8 @@ UPLOADS_DIR.mkdir(exist_ok=True)
 JWT_SECRET = "dev-secret"
 
 app = FastAPI()
+BLOCKED_IPS: set[str] = set()
+RATE_LIMITS: dict[str, dict] = {}
 
 
 @app.on_event("startup")
@@ -35,8 +37,25 @@ def on_startup():
 
 
 @app.middleware("http")
-async def log_requests(request: Request, call_next):
+async def defense_and_log(request: Request, call_next):
     ts = datetime.utcnow().isoformat()
+    ip = request.client.host if request.client else "unknown"
+
+    if ip in BLOCKED_IPS:
+        return JSONResponse(status_code=403, content={"error": "blocked"})
+
+    limiter = RATE_LIMITS.get(ip)
+    if limiter:
+        now = datetime.utcnow().timestamp()
+        window = limiter.get("window", 60)
+        limit = limiter.get("limit", 30)
+        timestamps = [t for t in limiter.get("hits", []) if now - t <= window]
+        if len(timestamps) >= limit:
+            limiter["hits"] = timestamps
+            return JSONResponse(status_code=429, content={"error": "rate_limited"})
+        timestamps.append(now)
+        limiter["hits"] = timestamps
+
     body_bytes = await request.body()
     body_text = body_bytes.decode("utf-8", errors="ignore")
     body_text = body_text[:1000]
@@ -44,8 +63,8 @@ async def log_requests(request: Request, call_next):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
-        "INSERT INTO request_logs (timestamp, method, path, query, body) VALUES (?, ?, ?, ?, ?)",
-        (ts, request.method, request.url.path, request.url.query, body_text),
+        "INSERT INTO request_logs (timestamp, method, path, query, body, ip) VALUES (?, ?, ?, ?, ?, ?)",
+        (ts, request.method, request.url.path, request.url.query, body_text, ip),
     )
     conn.commit()
     conn.close()
@@ -370,16 +389,44 @@ def internal_logs(since: Optional[str] = None):
     cur = conn.cursor()
     if since:
         cur.execute(
-            "SELECT timestamp, method, path, query, body FROM request_logs WHERE timestamp > ? ORDER BY id ASC",
+            "SELECT timestamp, method, path, query, body, ip FROM request_logs WHERE timestamp > ? ORDER BY id ASC",
             (since,),
         )
     else:
         cur.execute(
-            "SELECT timestamp, method, path, query, body FROM request_logs ORDER BY id DESC LIMIT 200"
+            "SELECT timestamp, method, path, query, body, ip FROM request_logs ORDER BY id DESC LIMIT 200"
         )
     rows = cur.fetchall()
     conn.close()
     return {"logs": [dict(r) for r in rows]}
+
+
+class DefenseAction(BaseModel):
+    ip: str
+    action: str
+    limit: Optional[int] = None
+    window: Optional[int] = None
+
+
+@app.post("/internal/defense")
+def internal_defense(payload: DefenseAction = Body(...)):
+    ip = payload.ip
+    action = payload.action.lower()
+    if action == "block":
+        BLOCKED_IPS.add(ip)
+        return {"status": "blocked", "ip": ip}
+    if action == "unblock":
+        BLOCKED_IPS.discard(ip)
+        return {"status": "unblocked", "ip": ip}
+    if action == "limit":
+        limit = payload.limit or 30
+        window = payload.window or 60
+        RATE_LIMITS[ip] = {"limit": limit, "window": window, "hits": []}
+        return {"status": "limited", "ip": ip, "limit": limit, "window": window}
+    if action == "clear":
+        RATE_LIMITS.pop(ip, None)
+        return {"status": "cleared", "ip": ip}
+    raise HTTPException(status_code=400, detail="invalid action")
 
 
 @app.get("/internal/source")
