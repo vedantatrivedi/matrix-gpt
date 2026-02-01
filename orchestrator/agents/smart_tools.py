@@ -99,14 +99,14 @@ def http_get_smart(url: str, params_json: Optional[str] = None) -> Dict[str, Any
             "url": url,
             "status": resp.status_code,
             "indicators": reasons,
-            "preview": resp.text[:100]  # Small preview
+            "preview": resp.text[:15]  # Codex: ultra-compressed
         }
 
     except Exception as exc:
         # Errors are always interesting
         return {
             "url": url,
-            "error": str(exc)[:80],
+            "error": str(exc)[:15],
             "indicators": ["request failed"]
         }
 
@@ -149,7 +149,7 @@ def http_batch_get_smart(urls_json: str) -> Dict[str, Any]:
                     "url": url,
                     "status": resp.status_code,
                     "indicators": reasons,
-                    "preview": resp.text[:80]
+                    "preview": resp.text[:15]
                 })
             else:
                 skipped += 1
@@ -158,7 +158,7 @@ def http_batch_get_smart(urls_json: str) -> Dict[str, Any]:
             # Errors are interesting
             interesting_results.append({
                 "url": url,
-                "error": str(exc)[:60],
+                "error": str(exc)[:15],
                 "indicators": ["connection failed"]
             })
 
@@ -166,7 +166,7 @@ def http_batch_get_smart(urls_json: str) -> Dict[str, Any]:
         return {
             "tested": total_tested,
             "interesting": 0,
-            "summary": "All responses normal. No vulnerabilities found."
+            "summary": "All normal"
         }
 
     return {
@@ -174,7 +174,7 @@ def http_batch_get_smart(urls_json: str) -> Dict[str, Any]:
         "interesting": len(interesting_results),
         "skipped_boring": skipped,
         "findings": interesting_results,
-        "summary": f"Found {len(interesting_results)} interesting responses out of {total_tested} tested"
+        "summary": f"{len(interesting_results)}/{total_tested} interesting"
     }
 
 
@@ -220,7 +220,7 @@ def test_sqli_smart(endpoints_json: str) -> Dict[str, Any]:
                     vulnerable.append({
                         "endpoint": endpoint,
                         "payload": payload,
-                        "proof": resp.text[:100],
+                        "proof": resp.text[:15],
                         "status": resp.status_code
                     })
                     break  # Found vuln, next endpoint
@@ -232,14 +232,14 @@ def test_sqli_smart(endpoints_json: str) -> Dict[str, Any]:
         return {
             "tested": total_tests,
             "vulnerable": 0,
-            "summary": "No SQL injection found"
+            "summary": "No SQLi"
         }
 
     return {
         "tested": total_tests,
         "vulnerable_count": len(vulnerable),
         "vulnerable_endpoints": vulnerable,
-        "summary": f"SQLi confirmed on {len(vulnerable)} endpoints"
+        "summary": f"SQLi: {len(vulnerable)} vulns"
     }
 
 
@@ -301,14 +301,14 @@ def test_xss_smart(endpoints_json: str) -> Dict[str, Any]:
         return {
             "tested": total_tests,
             "vulnerable": 0,
-            "summary": "No XSS found"
+            "summary": "No XSS"
         }
 
     return {
         "tested": total_tests,
         "vulnerable_count": len(vulnerable),
         "vulnerable_endpoints": vulnerable,
-        "summary": f"XSS confirmed on {len(vulnerable)} endpoints"
+        "summary": f"XSS: {len(vulnerable)} vulns"
     }
 
 
@@ -416,7 +416,7 @@ def scan_for_vulns_comprehensive(endpoints_json: str) -> Dict[str, Any]:
         return {
             "tested": total_tests,
             "findings": 0,
-            "summary": "No vulnerabilities found"
+            "summary": "None"
         }
 
     total_vulns = sum(len(v) for v in findings.values())
@@ -425,7 +425,7 @@ def scan_for_vulns_comprehensive(endpoints_json: str) -> Dict[str, Any]:
         "tested": total_tests,
         "findings_count": total_vulns,
         "findings": findings,
-        "summary": f"Found {total_vulns} vulnerabilities across {len(findings)} categories"
+        "summary": f"{total_vulns} vulns"
     }
 
 
