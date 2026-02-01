@@ -44,13 +44,15 @@ AI Red Team agents attack. AI Blue Team agents defend. The war is live.
 
 ## What It Does
 
-MatrixGPT is an autonomous adversarial security war game. Eight AI Red Team specialist agents attack a live web application through real HTTP requests — discovering vulnerabilities, crafting exploit chains, and exfiltrating data. Eight AI Blue Team specialist agents defend in parallel — monitoring request logs, detecting attacks, and deploying working code patches directly to the running application. A neutral Game Master scores every move and enforces safety rules. The entire battle plays out in real time on a military command-center dashboard, with zero human intervention required after you press START.
+MatrixGPT is a real‑time adversarial security war sim.
+Red Team attacks live endpoints; Blue Team monitors logs and applies live defenses (e.g., rate limiting).
+A neutral Game Master scores each round on a command‑center dashboard.
 
 ---
 
-## Attack & Defence Cycle
+<!-- ## Attack & Defence Cycle
 
-This seven-step loop repeats continuously for the duration of the battle. Steps 1–3 are the Red Team attack phase. Step 4 is Blue Team detection. Steps 5–6 are remediation. Step 7 scores the round and feeds back into the next iteration. When Blue Team patches a vulnerability, the same exploit vector genuinely stops working on the next Red Team attempt — judges can watch this happen in real time on the vulnerability board.
+This seven-step loop repeats continuously for the duration of the battle. Steps 1–3 are the Red Team attack phase. Step 4 is Blue Team detection. Steps 5–6 are remediation. Step 7 scores the round and feeds back into the next iteration. When Blue Team patches a vulnerability, the same exploit vector genuinely stops working on the next Red Team attempt — judges can watch this happen in real time on the vulnerability board. -->
 
 ---
 

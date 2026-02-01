@@ -1,0 +1,137 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 340" width="960" height="340">
+  <defs>
+    <style>
+      .mono { font-family: 'Courier New', monospace; }
+      .dim { fill: #475569; }
+      .sub { fill: #64748b; font-size: 9px; }
+    </style>
+    <marker id="fRed" markerWidth="9" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 9 3.5, 0 7" fill="#ef4444"/>
+    </marker>
+    <marker id="fBlue" markerWidth="9" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 9 3.5, 0 7" fill="#06b6d4"/>
+    </marker>
+    <marker id="fGreen" markerWidth="9" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 9 3.5, 0 7" fill="#22c55e"/>
+    </marker>
+    <marker id="fGrey" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
+      <polygon points="0 0, 7 2.5, 0 5" fill="#334155"/>
+    </marker>
+  </defs>
+
+  <!-- BG -->
+  <rect width="960" height="340" fill="#0a0e14"/>
+
+  <!-- Title bar -->
+  <rect x="0" y="0" width="960" height="32" fill="#0d1117"/>
+  <rect x="0" y="31" width="960" height="1" fill="#1e293b"/>
+  <text x="480" y="20" text-anchor="middle" class="mono" font-size="12" fill="#e2e8f0" font-weight="bold" letter-spacing="2.5">ATTACK &amp; DEFENCE CYCLE</text>
+
+  <!-- ============================================================ -->
+  <!-- STEP NODES — laid out in a loop: 1→2→3→4→5→6→7 back to 1   -->
+  <!-- Row A (top):  1  2  3  (left to right)                        -->
+  <!-- Row B (bot):  7  6  5  4  (right to left return)              -->
+  <!-- ============================================================ -->
+
+  <!-- ── ROW A ─────────────────────────────────────────────── -->
+
+  <!-- STEP 1 — Recon -->
+  <rect x="40" y="52" width="200" height="78" fill="#1a0a0a" stroke="#ef4444" stroke-width="1"/>
+  <rect x="40" y="52" width="200" height="18" fill="#1f0e0e"/>
+  <circle cx="54" cy="63" r="6" fill="#ef4444"/>
+  <text x="62" y="67" class="mono" font-size="10" fill="#ef4444" font-weight="bold">01</text>
+  <text x="100" y="67" class="mono" font-size="9" fill="#ef4444">RECONNAISSANCE</text>
+  <text x="55" y="90" class="mono" font-size="9" fill="#94a3b8">Recon Agent maps all</text>
+  <text x="55" y="102" class="mono" font-size="9" fill="#94a3b8">endpoints &amp; inputs</text>
+  <text x="55" y="118" class="mono sub">→ attack surface map</text>
+
+  <!-- STEP 2 — Vuln Hunt -->
+  <rect x="380" y="52" width="200" height="78" fill="#1a0a0a" stroke="#ef4444" stroke-width="1"/>
+  <rect x="380" y="52" width="200" height="18" fill="#1f0e0e"/>
+  <circle cx="394" cy="63" r="6" fill="#ef4444"/>
+  <text x="402" y="67" class="mono" font-size="10" fill="#ef4444" font-weight="bold">02</text>
+  <text x="440" y="67" class="mono" font-size="9" fill="#ef4444">VULN HUNT</text>
+  <text x="395" y="90" class="mono" font-size="9" fill="#94a3b8">Hunter probes inputs,</text>
+  <text x="395" y="102" class="mono" font-size="9" fill="#94a3b8">proves bugs via HTTP</text>
+  <text x="395" y="118" class="mono sub">→ confirmed vulns</text>
+
+  <!-- STEP 3 — Exploit -->
+  <rect x="720" y="52" width="200" height="78" fill="#1a0a0a" stroke="#ef4444" stroke-width="1"/>
+  <rect x="720" y="52" width="200" height="18" fill="#1f0e0e"/>
+  <circle cx="734" cy="63" r="6" fill="#ef4444"/>
+  <text x="742" y="67" class="mono" font-size="10" fill="#ef4444" font-weight="bold">03</text>
+  <text x="780" y="67" class="mono" font-size="9" fill="#ef4444">EXPLOIT</text>
+  <text x="735" y="90" class="mono" font-size="9" fill="#94a3b8">Developer chains vulns,</text>
+  <text x="735" y="102" class="mono" font-size="9" fill="#94a3b8">exfiltrates data</text>
+  <text x="735" y="118" class="mono sub">→ breach achieved</text>
+
+  <!-- ── TURN ARROW (right edge, step 3 → 4) ─── -->
+  <path d="M 820 130 L 820 155 Q 820 165 830 165 L 905 165 Q 915 165 915 175 L 915 210" 
+        stroke="#ef4444" stroke-width="1.5" fill="none" marker-end="url(#fRed)" stroke-dasharray="none"/>
+
+  <!-- ── ROW B ─────────────────────────────────────────────── -->
+
+  <!-- STEP 4 — SOC Detects -->
+  <rect x="720" y="210" width="200" height="78" fill="#0a1a1a" stroke="#06b6d4" stroke-width="1"/>
+  <rect x="720" y="210" width="200" height="18" fill="#0e1f1f"/>
+  <circle cx="734" cy="221" r="6" fill="#06b6d4"/>
+  <text x="742" y="225" class="mono" font-size="10" fill="#06b6d4" font-weight="bold">04</text>
+  <text x="780" y="225" class="mono" font-size="9" fill="#06b6d4">SOC DETECTS</text>
+  <text x="735" y="248" class="mono" font-size="9" fill="#94a3b8">Monitor sees anomalous</text>
+  <text x="735" y="260" class="mono" font-size="9" fill="#94a3b8">patterns in request logs</text>
+  <text x="735" y="276" class="mono sub">→ alert raised</text>
+
+  <!-- STEP 5 — Patch Gen -->
+  <rect x="380" y="210" width="200" height="78" fill="#0a1a1a" stroke="#06b6d4" stroke-width="1"/>
+  <rect x="380" y="210" width="200" height="18" fill="#0e1f1f"/>
+  <circle cx="394" cy="221" r="6" fill="#06b6d4"/>
+  <text x="402" y="225" class="mono" font-size="10" fill="#06b6d4" font-weight="bold">05</text>
+  <text x="440" y="225" class="mono" font-size="9" fill="#06b6d4">PATCH GENERATED</text>
+  <text x="395" y="248" class="mono" font-size="9" fill="#94a3b8">Patch Dev reads source,</text>
+  <text x="395" y="260" class="mono" font-size="9" fill="#94a3b8">writes surgical fix</text>
+  <text x="395" y="276" class="mono sub">→ unified diff ready</text>
+
+  <!-- STEP 6 — Live Deploy -->
+  <rect x="180" y="210" width="160" height="78" fill="#0a1a0a" stroke="#22c55e" stroke-width="1.5"/>
+  <rect x="180" y="210" width="160" height="18" fill="#0e1f1f"/>
+  <circle cx="194" cy="221" r="6" fill="#22c55e"/>
+  <text x="202" y="225" class="mono" font-size="10" fill="#22c55e" font-weight="bold">06</text>
+  <text x="235" y="225" class="mono" font-size="9" fill="#22c55e">LIVE DEPLOY</text>
+  <text x="195" y="248" class="mono" font-size="9" fill="#94a3b8">Patch pushed to</text>
+  <text x="195" y="260" class="mono" font-size="9" fill="#94a3b8">running app via</text>
+  <text x="195" y="272" class="mono" font-size="9" fill="#94a3b8">/internal/reload</text>
+
+  <!-- STEP 7 — Score & Loop -->
+  <rect x="40" y="210" width="100" height="78" fill="#0f1520" stroke="#334155" stroke-width="1"/>
+  <rect x="40" y="210" width="100" height="18" fill="#111820"/>
+  <circle cx="54" cy="221" r="6" fill="#334155"/>
+  <text x="62" y="225" class="mono" font-size="10" fill="#94a3b8" font-weight="bold">07</text>
+  <text x="55" y="248" class="mono" font-size="9" fill="#94a3b8">SCORE &amp;</text>
+  <text x="55" y="260" class="mono" font-size="9" fill="#94a3b8">LOOP</text>
+  <text x="55" y="276" class="mono sub">→ next round</text>
+
+  <!-- ── HORIZONTAL ARROWS ROW A ─── -->
+  <!-- 1 → 2 -->
+  <line x1="240" y1="91" x2="380" y2="91" stroke="#ef4444" stroke-width="1.5" fill="none" marker-end="url(#fRed)" stroke-dasharray="4,3"/>
+  <!-- 2 → 3 -->
+  <line x1="580" y1="91" x2="720" y2="91" stroke="#ef4444" stroke-width="1.5" fill="none" marker-end="url(#fRed)" stroke-dasharray="4,3"/>
+
+  <!-- ── HORIZONTAL ARROWS ROW B (right to left) ─── -->
+  <!-- 4 → 5 -->
+  <line x1="720" y1="249" x2="580" y2="249" stroke="#06b6d4" stroke-width="1.5" fill="none" marker-end="url(#fBlue)" stroke-dasharray="4,3"/>
+  <!-- 5 → 6 -->
+  <line x1="380" y1="249" x2="340" y2="249" stroke="#22c55e" stroke-width="1.5" fill="none" marker-end="url(#fGreen)"/>
+  <!-- 6 → 7 -->
+  <line x1="180" y1="249" x2="140" y2="249" stroke="#334155" stroke-width="1.2" fill="none" marker-end="url(#fGrey)"/>
+
+  <!-- ── LOOP ARROW (7 back up to 1) ─── -->
+  <path d="M 90 210 L 90 185 Q 90 175 80 175 L 25 175 Q 15 175 15 165 L 15 100 Q 15 90 25 90 L 40 90"
+        stroke="#334155" stroke-width="1.2" fill="none" marker-end="url(#fGrey)" stroke-dasharray="none"/>
+  <text x="8" y="152" class="mono" font-size="8" fill="#475569" transform="rotate(-90 8 152)">CONTINUOUS LOOP</text>
+
+  <!-- ── PHASE LABELS (top right area) ─── -->
+  <rect x="760" y="150" width="180" height="52" fill="#0d1117" stroke="#1e293b" stroke-width="1"/>
+  <text x="770" y="167" class="mono" font-size="8" fill="#ef4444">■ ATTACK PHASE</text>
+  <text x="770" y="180" class="mono" font-size="8" fill="#06b6d4">■ DETECT PHASE</text>
+  <text x="770" y="193" class="mono" font-size="8" fill="#22c55e">■ REMEDIATE PHASE</text>
+</svg>
