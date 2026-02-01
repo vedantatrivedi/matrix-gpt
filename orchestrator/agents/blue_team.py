@@ -6,20 +6,21 @@ except ModuleNotFoundError:
     from oai_agents import Agent
 
 try:
-    from orchestrator.agents.tools import apply_patch, get_recent_logs, get_source_file
+    from orchestrator.agents.tools import block_ip, get_recent_logs, rate_limit_ip
 except ModuleNotFoundError:
-    from agents.tools import apply_patch, get_recent_logs, get_source_file
+    from agents.tools import block_ip, get_recent_logs, rate_limit_ip
 
 
 SOC_INSTRUCTIONS = "Check recent logs for attack indicators. Summarize confirmed attack paths."
 
-PATCH_DEV_INSTRUCTIONS = "Patch vulnerabilities in sample-app/app.py only."
+PATCH_DEV_INSTRUCTIONS = "TODO: implement faster patching workflow later."
 
 COMMANDER_INSTRUCTIONS_FLAT = """You are the Blue Team Commander.
 1) Call get_recent_logs() first.
-2) If you see attack traffic, call get_source_file(filename="app.py") (not app.js/index.html).
-3) Propose a minimal patch, then call apply_patch(filename="app.py", diff=...).
-Return brief bullet steps + what you patched.
+2) Identify likely vulnerabilities from log patterns.
+3) When you see active exploitation, call block_ip(ip=...) or rate_limit_ip(ip=..., limit=..., window=...).
+4) Explicitly state if an exploit is blocked preemptively.
+Return brief bullet steps + what you detected.
 If a tool returns an error, retry once before moving on."""
 
 COMMANDER_INSTRUCTIONS_HIERARCHICAL = "Run SOC→Patch. Brief bullets."
@@ -58,10 +59,6 @@ if USE_HIERARCHICAL:
         instructions=COMMANDER_INSTRUCTIONS_HIERARCHICAL,
         tools=[
             soc_monitor.as_tool(tool_name="soc_monitor", tool_description="Analyze logs"),
-            patch_developer.as_tool(
-                tool_name="patch_developer", tool_description="Generate patch"
-            ),
-            apply_patch,
         ],
     )
 else:
@@ -72,9 +69,9 @@ else:
         model=MODEL,
         instructions=COMMANDER_INSTRUCTIONS_FLAT,
         tools=[
-            # Direct access to all tools (no sub-agents)
+            # Direct access to logs only (no patching)
             get_recent_logs,
-            get_source_file,
-            apply_patch,
+            block_ip,
+            rate_limit_ip,
         ],
     )

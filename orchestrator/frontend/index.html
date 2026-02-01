@@ -96,8 +96,11 @@
         const [modelUsage, setModelUsage] = useState({});
         const [showTelemetry, setShowTelemetry] = useState(false);
         const [roundResult, setRoundResult] = useState(null);
+        const [battleSummary, setBattleSummary] = useState(null);
+        const [pendingSummary, setPendingSummary] = useState(null);
         const wsRef = useRef(null);
         const hasHydratedRef = useRef(false);
+        const manualStopRef = useRef(false);
 
         const redScoreDisplay = useCountUp(redScore);
         const blueScoreDisplay = useCountUp(blueScore);
@@ -147,6 +150,9 @@
             if (evt.type === 'round_end') {
               setRoundResult(evt.data || { winner: 'draw', round: 0, reason: '' });
             }
+            if (evt.type === 'battle_end' && evt.data?.summary) {
+              setPendingSummary(evt.data.summary);
+            }
 
             // Parse port discovery info
             if (evt.data?.description?.includes('Port scan complete')) {
@@ -164,7 +170,7 @@
               else if (desc.includes('🟠 HIGH')) severity = 'high';
 
               const urlMatch = desc.match(/(https?:\/\/[^\s]+)/);
-              const typeMatch = desc.match(/(?:CRITICAL|HIGH):\s+([^at]+)/);
+              const typeMatch = desc.match(/(?:CRITICAL|HIGH):\s+(.+?)\s+at\s+/);
 
               setParsedVulns((prev) => [
                 ...prev,
@@ -193,6 +199,7 @@
 
         useEffect(() => {
           const loadStatus = async () => {
+            if (manualStopRef.current) return;
             setLoadingStatus(true);
             const res = await fetch('/api/battle/status');
             const data = await res.json();
@@ -223,7 +230,7 @@
                   if (desc.includes('🔴 CRITICAL')) severity = 'critical';
                   else if (desc.includes('🟠 HIGH')) severity = 'high';
                   const urlMatch = desc.match(/(https?:\/\/[^\s]+)/);
-                  const typeMatch = desc.match(/(?:CRITICAL|HIGH):\s+([^at]+)/);
+              const typeMatch = desc.match(/(?:CRITICAL|HIGH):\s+(.+?)\s+at\s+/);
                   return {
                     id: `hist-${idx}`,
                     severity,
@@ -287,6 +294,8 @@
           setPortInfo(null);
           setModelUsage({});
           setRoundResult(null);
+          setBattleSummary(null);
+          setPendingSummary(null);
           hasHydratedRef.current = false;
         };
         const startMockBattle = async () => {
@@ -305,26 +314,38 @@
           setPortInfo(null);
           setModelUsage({});
           setRoundResult(null);
+          setBattleSummary(null);
+          setPendingSummary(null);
           hasHydratedRef.current = false;
         };
 
         const stopBattle = async () => {
+          manualStopRef.current = true;
           await fetch('/api/battle/stop', { method: 'POST' });
           setActiveBattle(null);
           setPhase('post');
+          setBattleId(null);
+          setPendingSummary(null);
         };
 
         const stopAndReturn = async () => {
+          manualStopRef.current = true;
           await fetch('/api/battle/stop', { method: 'POST' });
           setActiveBattle(null);
           setPhase('pre');
+          setBattleId(null);
+          setPendingSummary(null);
         };
 
         const forceStopBattle = async (id) => {
+          manualStopRef.current = true;
           await fetch(`/api/battle/force-stop?battle_id=${id}`, { method: 'POST' });
           const res = await fetch('/api/battles');
           const data = await res.json();
           setBattles(data.battles || []);
+          setActiveBattle(null);
+          setBattleId(null);
+          setPendingSummary(null);
         };
 
         const resumeBattle = async (id) => {
@@ -1148,8 +1169,99 @@
                   ),
                   h(
                     'button',
-                    { className: 'btn btn-green mt-6', onClick: () => setRoundResult(null) },
+                    { className: 'btn btn-green mt-6', onClick: () => {
+                      setRoundResult(null);
+                      if (pendingSummary) {
+                        setBattleSummary(pendingSummary);
+                        setPendingSummary(null);
+                      }
+                    } },
                     'Continue'
+                  )
+                )
+              )
+            : null
+          ,
+          battleSummary
+            ? h(
+                'div',
+                { className: 'fixed inset-0 z-50 flex items-center justify-center' },
+                h('div', {
+                  className: 'absolute inset-0 bg-black/70',
+                  onClick: () => setBattleSummary(null)
+                }),
+                h(
+                  'div',
+                  { className: 'relative panel p-8 max-w-2xl w-[92%] text-center' },
+                  h(
+                    'div',
+                    {
+                      className: 'text-3xl tracking-[0.2em]',
+                      style: {
+                        color:
+                          battleSummary.winner === 'red'
+                            ? 'var(--red)'
+                            : battleSummary.winner === 'blue'
+                            ? 'var(--cyan)'
+                            : 'var(--text)',
+                      },
+                    },
+                    'BATTLE COMPLETE'
+                  ),
+                  h('div', { className: 'text-xs text-slate-400 mt-2' }, 'FINAL SUMMARY'),
+                  h(
+                    'div',
+                    {
+                      className: 'mt-6 text-lg',
+                      style: {
+                        color:
+                          battleSummary.winner === 'red'
+                            ? 'var(--red)'
+                            : battleSummary.winner === 'blue'
+                            ? 'var(--cyan)'
+                            : 'var(--text)',
+                      },
+                    },
+                    battleSummary.winner === 'draw'
+                      ? 'DRAW'
+                      : `${battleSummary.winner?.toUpperCase()} TEAM WINS`
+                  ),
+                  h(
+                    'div',
+                    { className: 'mt-4 text-xs text-slate-400' },
+                    `Red wins: ${battleSummary.red_wins || 0} • Blue wins: ${battleSummary.blue_wins || 0} • Draws: ${battleSummary.draws || 0}`
+                  ),
+                  h(
+                    'div',
+                    { className: 'mt-3 text-xs text-slate-400' },
+                    `Final score — Red: ${battleSummary.red_score || 0} • Blue: ${battleSummary.blue_score || 0}`
+                  ),
+                  h(
+                    'div',
+                    { className: 'mt-6 text-left text-xs panel p-4' },
+                    h('div', { className: 'text-slate-400 mb-2' }, 'ROUND LOG'),
+                    ...(battleSummary.rounds || []).map((r, idx) =>
+                      h(
+                        'div',
+                        { key: idx, className: 'flex items-center justify-between mb-1' },
+                        h('span', { className: 'text-slate-300' }, `Round ${r.round}`),
+                        h('span', {
+                          style: {
+                            color:
+                              r.winner === 'red'
+                                ? 'var(--red)'
+                                : r.winner === 'blue'
+                                ? 'var(--cyan)'
+                                : 'var(--text)',
+                          },
+                        }, r.winner?.toUpperCase() || 'DRAW')
+                      )
+                    )
+                  ),
+                  h(
+                    'button',
+                    { className: 'btn btn-green mt-6', onClick: () => setBattleSummary(null) },
+                    'Close'
                   )
                 )
               )

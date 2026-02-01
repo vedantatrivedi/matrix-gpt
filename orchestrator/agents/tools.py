@@ -64,6 +64,21 @@ def _with_retry(action, attempts: int = 2, delay: float = 0.3):
     raise last_exc
 
 
+def _defense_action_impl(ip: str, action: str, limit: Optional[int] = None, window: Optional[int] = None) -> Dict[str, Any]:
+    try:
+        def _do_request():
+            resp = httpx.post(
+                f"{TARGET_URL}/internal/defense",
+                json={"ip": ip, "action": action, "limit": limit, "window": window},
+                timeout=5.0,
+            )
+            return {"status_code": resp.status_code, "body": _truncate(resp.text)}
+
+        return _with_retry(_do_request)
+    except Exception as exc:
+        return {"status_code": 0, "body": f"error: {exc}"}
+
+
 def _http_get_impl(url: str, params_json: Optional[str] = None, headers_json: Optional[str] = None) -> Dict[str, Any]:
     """Make a real GET request and return status, headers, and body (truncated)."""
     try:
@@ -169,6 +184,8 @@ def _get_recent_logs_impl(since_timestamp: Optional[str] = None, limit: int = 10
             for log in logs:
                 if "path" in log and isinstance(log["path"], str):
                     log["path"] = log["path"][:100]
+                if "ip" in log and isinstance(log["ip"], str):
+                    log["ip"] = log["ip"][:100]
                 if "body" in log and isinstance(log["body"], str):
                     log["body"] = _truncate(log["body"], 50)
                 if "response" in log and isinstance(log["response"], str):
@@ -269,6 +286,16 @@ def get_source_file(filename: str) -> Dict[str, Any]:
 @function_tool
 def apply_patch(filename: str, diff: str) -> Dict[str, Any]:
     return _apply_patch_impl(filename=filename, diff=diff)
+
+
+@function_tool
+def block_ip(ip: str) -> Dict[str, Any]:
+    return _defense_action_impl(ip=ip, action="block")
+
+
+@function_tool
+def rate_limit_ip(ip: str, limit: int = 30, window: int = 60) -> Dict[str, Any]:
+    return _defense_action_impl(ip=ip, action="limit", limit=limit, window=window)
 
 
 # ============================================================================

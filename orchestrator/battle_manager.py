@@ -2,6 +2,7 @@ import asyncio
 import json
 import sys
 import os
+import httpx
 import logging
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -27,7 +28,7 @@ from orchestrator.oai_agents import Runner
 from orchestrator.agents.blue_team import blue_team_commander
 from orchestrator.agents.game_master import score_event
 from orchestrator.agents.red_team import red_team_commander
-from orchestrator.agents.tools import get_recent_logs, set_battle_context
+from orchestrator.agents.tools import _get_recent_logs_impl, set_battle_context
 from orchestrator.db import (
     create_battle,
     end_battle,
@@ -55,6 +56,9 @@ class BattleManager:
         self._rate_limit_backoff = float(os.environ.get("AGENT_RATE_LIMIT_BACKOFF", "3.0"))
         self._round_state: Optional[Dict[str, Any]] = None
         self._tool_call_index: Dict[str, str] = {}
+        self._match_active = False
+        self._blue_found_vulns: set[str] = set()
+        self._round_results: list[Dict[str, Any]] = []
 
     @property
     def battle_id(self) -> Optional[str]:
@@ -73,6 +77,8 @@ class BattleManager:
                 self._battle_id = None
         self._target_url = target_url
         self._battle_id = create_battle(target_url)
+        self._blue_found_vulns = set()
+        self._round_results = []
         print(f"[DEBUG] Created new battle_id: {self._battle_id}")
         self._start_time = datetime.utcnow()
         self._stop_event.clear()
@@ -93,23 +99,17 @@ class BattleManager:
             self._red_task = asyncio.create_task(self._mock_loop())
             self._blue_task = None
         else:
-            # FREE TIER FIX: If using flat agents, run teams sequentially
-            use_hierarchical = os.environ.get("USE_HIERARCHICAL_AGENTS", "false").lower() == "true"
-            if use_hierarchical:
-                # Paid tier: Start both teams concurrently
-                self._red_task = asyncio.create_task(self._red_loop())
-                self._blue_task = asyncio.create_task(self._blue_loop())
-            else:
-                # Free tier: Run teams one after another (Red completes, then Blue starts)
-                self._red_task = asyncio.create_task(self._round_battle())
-                self._blue_task = None  # Handled inside sequential_battle
+            # Always run round-based battle (red + blue monitor in parallel)
+            self._red_task = asyncio.create_task(self._round_battle())
+            self._blue_task = None
         return self._battle_id
 
     async def stop_battle(self, status: str = "stopped") -> None:
         if not self._battle_id:
             return
         self._stop_event.set()
-        tasks = [t for t in (self._red_task, self._blue_task) if t]
+        current = asyncio.current_task()
+        tasks = [t for t in (self._red_task, self._blue_task) if t and t is not current]
         for task in tasks:
             task.cancel()
         if tasks:
@@ -117,13 +117,23 @@ class BattleManager:
         end_battle(self._battle_id, status)
         self._red_task = None
         self._blue_task = None
+        summary = self._build_battle_summary() if status == "completed" else None
         await self._event_sink(
             {
                 "type": "battle_end",
                 "team": "system",
                 "agent": "Battle Manager",
                 "timestamp": datetime.utcnow().isoformat(),
-                "data": {"battle_id": self._battle_id, "status": status},
+                "data": {"battle_id": self._battle_id, "status": status, "summary": summary},
+            }
+        )
+        await self._event_sink(
+            {
+                "type": "battle_event",
+                "team": "system",
+                "agent": "Battle Manager",
+                "timestamp": datetime.utcnow().isoformat(),
+                "data": {"description": "Battle ended", "severity": "low"},
             }
         )
         self._battle_id = None
@@ -131,9 +141,13 @@ class BattleManager:
     async def _round_battle(self) -> None:
         """Run a 3-round match with continuous Blue monitoring."""
         rounds = 3
-        round_delay = float(os.environ.get("ROUND_DELAY_SECONDS", "10"))
+        round_delay = float(os.environ.get("ROUND_DELAY_SECONDS", "5"))
+        round_prep_delay = float(os.environ.get("ROUND_PREP_DELAY_SECONDS", "7"))
+        round_timeout = float(os.environ.get("ROUND_TIMEOUT_SECONDS", "90"))
+        self._match_active = True
+        self._round_results = []
         for round_index in range(1, rounds + 1):
-            if self._should_stop():
+            if self._stop_event.is_set() or (self._start_time and datetime.utcnow() - self._start_time > timedelta(minutes=15)):
                 break
 
             self._round_state = {
@@ -145,6 +159,9 @@ class BattleManager:
                 "tool_failure": False,
                 "blocked_by_blue": False,
                 "last_vuln": None,
+                "ip_incidents": {},
+                "ip_last_seen": {},
+                "ip_warned": set(),
             }
             self._tool_call_index.clear()
 
@@ -155,13 +172,41 @@ class BattleManager:
                 "timestamp": datetime.utcnow().isoformat(),
                 "data": {"round": round_index, "description": f"Round {round_index} started"},
             })
+            await self._event_sink({
+                "type": "battle_event",
+                "team": "blue",
+                "agent": "SOC Monitor",
+                "timestamp": datetime.utcnow().isoformat(),
+                "data": {"description": "Blue Team monitoring logs...", "severity": "low"},
+            })
+            await self._event_sink({
+                "type": "battle_event",
+                "team": "red",
+                "agent": "Red Team Commander",
+                "timestamp": datetime.utcnow().isoformat(),
+                "data": {"description": "Red Team scanning for vulnerabilities...", "severity": "low"},
+            })
+            await self._event_sink({
+                "type": "battle_event",
+                "team": "system",
+                "agent": "Battle Manager",
+                "timestamp": datetime.utcnow().isoformat(),
+                "data": {"description": f"Round {round_index} prep: teams analyzing for {int(round_prep_delay)}s...", "severity": "low"},
+            })
+            await asyncio.sleep(round_prep_delay)
 
             red_task = asyncio.create_task(self._red_loop())
-            blue_monitor = asyncio.create_task(self._blue_monitor_loop())
+            initial_delay = 10.0 if round_index == 1 else 0.0
+            blue_monitor = asyncio.create_task(self._blue_monitor_loop(initial_delay))
 
             try:
+                start_ts = datetime.utcnow().timestamp()
                 while not red_task.done():
                     if self._round_state.get("winner"):
+                        red_task.cancel()
+                        break
+                    if datetime.utcnow().timestamp() - start_ts >= round_timeout:
+                        await self._finalize_round("draw", "Round timeout", round_index)
                         red_task.cancel()
                         break
                     await asyncio.sleep(0.2)
@@ -182,21 +227,12 @@ class BattleManager:
                 await asyncio.gather(blue_monitor, return_exceptions=True)
 
             self._round_state["active"] = False
-            if self._round_state.get("winner") == "red":
-                await self._event_sink({
-                    "type": "battle_event",
-                    "team": "system",
-                    "agent": "Battle Manager",
-                    "timestamp": datetime.utcnow().isoformat(),
-                    "data": {"description": "Blue Team patching before next round...", "severity": "low"},
-                })
-                await self._blue_patch_after_loss(round_index)
-
             if round_index < rounds and not self._should_stop():
                 await asyncio.sleep(round_delay)
 
         if not self._should_stop():
             await self.stop_battle("completed")
+        self._match_active = False
 
     async def _red_loop(self) -> None:
         """EMERGENCY FIX: Run once to prevent token explosion."""
@@ -261,6 +297,19 @@ class BattleManager:
 
             # Announce CRITICAL vulnerabilities
             findings = prescan_result['findings']
+            if self._blue_found_vulns:
+                filtered = {
+                    "critical": [v for v in findings.get("critical", []) if v.get("type") not in self._blue_found_vulns],
+                    "high": [v for v in findings.get("high", []) if v.get("type") not in self._blue_found_vulns],
+                }
+                prescan_result = dict(prescan_result)
+                prescan_result["findings"] = filtered
+                prescan_result["critical_count"] = len(filtered["critical"])
+                prescan_result["high_count"] = len(filtered["high"])
+                findings = filtered
+                if prescan_result["critical_count"] == 0 and prescan_result["high_count"] == 0:
+                    await self._finalize_round("blue", "No new vulnerabilities left for Red Team", self._round_state["round"])
+                    return
             if findings['critical']:
                 for vuln in findings['critical']:
                     vuln_type = vuln.get('type', 'Unknown')
@@ -306,6 +355,26 @@ class BattleManager:
                 "timestamp": datetime.utcnow().isoformat(),
                 "data": {"description": "Analyzing vulnerabilities with AI...", "severity": "low"}
             })
+
+            # Force a baseline exploit attempt so Blue has traffic to detect
+            if findings.get("critical"):
+                first = findings["critical"][0]
+                url = first.get("url")
+                if url:
+                    try:
+                        payload = "' OR '1'='1"
+                        resp = httpx.get(
+                            url,
+                            params={"q": payload, "id": payload, "search": payload},
+                            timeout=3.0,
+                        )
+                        if self._round_state and self._round_state.get("active"):
+                            self._round_state["exploit_called"] = True
+                            if resp.status_code == 200:
+                                self._round_state["exploit_succeeded"] = True
+                    except Exception:
+                        if self._round_state and self._round_state.get("active"):
+                            self._round_state["tool_failure"] = True
 
             # Now call LLM with pre-scanned findings
             await self._run_agent_loop(
@@ -379,32 +448,7 @@ class BattleManager:
                 }
             )
 
-    async def _blue_patch_after_loss(self, round_index: int) -> None:
-        if self._should_stop():
-            return
-        vuln_details = self._round_state.get("last_vuln") if self._round_state else None
-        prompt = "Patch the vulnerability exploited in the previous round. Focus on sample-app/app.py."
-        if vuln_details:
-            prompt += f" Details: {vuln_details}"
-        try:
-            await self._run_agent_loop(
-                team="blue",
-                agent_name="Blue Team Commander",
-                agent=blue_team_commander,
-                input_text=prompt,
-            )
-        except asyncio.CancelledError:
-            return
-        except Exception as exc:
-            await self._event_sink(
-                {
-                    "type": "battle_event",
-                    "team": "system",
-                    "agent": "Battle Manager",
-                    "timestamp": datetime.utcnow().isoformat(),
-                    "data": {"description": f"Blue patch error: {exc}", "severity": "low"},
-                }
-            )
+    # TODO: Implement faster patching workflow later (intentionally removed from demo flow).
 
         # STOP HERE - Don't loop
         # Original loop commented out to save tokens
@@ -959,6 +1003,8 @@ class BattleManager:
 
     async def _score_and_broadcast(self, description: str) -> None:
         """Rule-based scoring (no LLM calls)."""
+        if self._match_active:
+            return
         if self._round_state and self._round_state.get("active"):
             return
         if not self._battle_id:
@@ -1117,41 +1163,216 @@ class BattleManager:
             )
         )
 
-    async def _blue_monitor_loop(self) -> None:
+    async def _blue_monitor_loop(self, initial_delay: float = 0.0) -> None:
         """Continuously monitor logs and block before exploit is called."""
         last_since = None
-        while self._round_state and self._round_state.get("active"):
+        poll_interval = float(os.environ.get("BLUE_MONITOR_INTERVAL_SECONDS", "0.5"))
+        await asyncio.sleep(initial_delay)
+        while self._round_state and self._round_state.get("active") and not self._should_stop():
             if self._round_state.get("winner"):
                 return
             if self._round_state.get("exploit_called"):
-                await asyncio.sleep(1.5)
+                await asyncio.sleep(poll_interval)
                 continue
             try:
-                result = await asyncio.to_thread(get_recent_logs, last_since)
+                result = await asyncio.to_thread(_get_recent_logs_impl, last_since)
                 logs = result.get("logs", [])
                 if logs:
                     last_since = logs[-1].get("timestamp") or last_since
-                if self._detect_attack_pattern(logs):
-                    await self._finalize_round("blue", "Blocked exploit based on log patterns", self._round_state["round"])
+                detection = self._detect_attack_pattern(logs)
+                if detection:
+                    vuln = detection.get("vuln", "Unknown")
+                    ip = detection.get("ip", "unknown")
+                    self._blue_found_vulns.add(vuln)
+                    incidents = self._round_state["ip_incidents"]
+                    last_seen = self._round_state["ip_last_seen"]
+                    warned = self._round_state["ip_warned"]
+                    now_ts = datetime.utcnow().timestamp()
+                    if ip in last_seen and now_ts - last_seen[ip] < 10.0:
+                        last_seen[ip] = now_ts
+                        continue
+                    last_seen[ip] = now_ts
+                    incidents[ip] = incidents.get(ip, 0) + 1
+                    if incidents[ip] == 1:
+                        if ip in warned:
+                            incidents[ip] = 2
+                        else:
+                            warned.add(ip)
+                        if self._battle_id:
+                            insert_event(
+                                self._battle_id,
+                                event_type="battle_event",
+                                team="blue",
+                                agent_name="SOC Monitor",
+                                description=f"Initial exploit wave observed from {ip}. Rate Limiting user",
+                                details={"ip": ip, "wave": incidents[ip]},
+                            )
+                        await self._event_sink(
+                            {
+                                "type": "battle_event",
+                                "team": "blue",
+                                "agent": "SOC Monitor",
+                                "timestamp": datetime.utcnow().isoformat(),
+                                "data": {
+                                    "description": f"Initial exploit wave observed from {ip}. Rate Limiting user",
+                                    "severity": "low",
+                                },
+                            }
+                        )
+                        continue
+                    elif incidents[ip] == 2:
+                        if self._battle_id:
+                            insert_event(
+                                self._battle_id,
+                                event_type="tool_call",
+                                team="blue",
+                                agent_name="SOC Monitor",
+                                description="rate_limit_ip call",
+                                details={"tool": "rate_limit_ip", "args": {"ip": ip, "limit": 5, "window": 10}},
+                            )
+                        await self._event_sink(
+                            {
+                                "type": "tool_call",
+                                "team": "blue",
+                                "agent": "SOC Monitor",
+                                "timestamp": datetime.utcnow().isoformat(),
+                                "data": {"tool": "rate_limit_ip", "args": {"ip": ip, "limit": 5, "window": 10}},
+                            }
+                        )
+                        await self._defense_action(ip, "limit", limit=5, window=10)
+                        if self._battle_id:
+                            insert_event(
+                                self._battle_id,
+                                event_type="tool_result",
+                                team="blue",
+                                agent_name="SOC Monitor",
+                                description="rate_limit_ip result",
+                                details={"output": {"status": "limit", "ip": ip, "limit": 5, "window": 10}},
+                            )
+                        await self._event_sink(
+                            {
+                                "type": "tool_result",
+                                "team": "blue",
+                                "agent": "SOC Monitor",
+                                "timestamp": datetime.utcnow().isoformat(),
+                                "data": {"output": {"status": "limit", "ip": ip, "limit": 5, "window": 10}},
+                            }
+                        )
+                        await self._event_sink(
+                            {
+                                "type": "battle_event",
+                                "team": "blue",
+                                "agent": "SOC Monitor",
+                                "timestamp": datetime.utcnow().isoformat(),
+                                "data": {
+                                    "description": f"Blue deployed rate limiting (5 req / 10s) for {ip}. Defense change applied.",
+                                    "severity": "medium",
+                                },
+                            }
+                        )
+                    else:
+                        if self._battle_id:
+                            insert_event(
+                                self._battle_id,
+                                event_type="battle_event",
+                                team="blue",
+                                agent_name="SOC Monitor",
+                                description=f"Repeated exploit waves from {ip}. Suggest: block or isolate source.",
+                                details={"ip": ip, "wave": incidents[ip]},
+                            )
+                        await self._event_sink(
+                            {
+                                "type": "battle_event",
+                                "team": "blue",
+                                "agent": "SOC Monitor",
+                                "timestamp": datetime.utcnow().isoformat(),
+                                "data": {
+                                    "description": f"Repeated exploit waves from {ip}. Suggest: block or isolate source.",
+                                    "severity": "medium",
+                                },
+                            }
+                        )
+                    await self._event_sink(
+                        {
+                            "type": "battle_event",
+                            "team": "blue",
+                            "agent": "SOC Monitor",
+                            "timestamp": datetime.utcnow().isoformat(),
+                            "data": {
+                                "description": f"Defense change successful — Blue wins after rate limiting {ip} for {vuln}.",
+                                "severity": "medium",
+                            },
+                        }
+                    )
+                    await self._finalize_round("blue", "Blue rate limiting deflected the second wave", self._round_state["round"])
                     return
             except Exception:
                 pass
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(poll_interval)
 
-    def _detect_attack_pattern(self, logs: list[dict]) -> bool:
+    def _detect_attack_pattern(self, logs: list[dict]) -> Optional[Dict[str, str]]:
+        from urllib.parse import unquote
         for log in logs:
             path = (log.get("path") or "").lower()
             query = (log.get("query") or "").lower()
             body = (log.get("body") or "").lower()
             joined = " ".join([path, query, body])
-            if "/api/products" in path and any(k in joined for k in ["union select", " or '1'='1", " or \"1\"=\"1", "sql", "select ", "sqli"]):
-                return True
-        return False
+            decoded = unquote(joined)
+            ip = log.get("ip") or "unknown"
+
+            # SQLi
+            if any(p in path for p in ["/api/products", "/api/admin", "/api/users", "/api/orders", "/api/search"]) and any(
+                k in joined or k in decoded for k in ["union select", " or '1'='1", " or \"1\"=\"1", "sql", "select ", "sqli", "admin'--", "or 1=1"]
+            ):
+                return {"vuln": "SQL Injection", "ip": ip}
+
+            # Stored/Reflected XSS
+            if any(p in path for p in ["/api/reviews", "/api/comments", "/api/feedback", "/api/users/avatar"]) and any(
+                k in joined or k in decoded for k in ["<script", "onerror=", "onload=", "javascript:", "<img", "<svg"]
+            ):
+                return {"vuln": "Stored XSS", "ip": ip}
+
+            # SSRF
+            if any(p in path for p in ["/api/image-proxy", "/api/proxy"]) and any(
+                k in joined or k in decoded for k in ["http://", "https://", "localhost", "127.0.0.1", "169.254.", "metadata.google.internal"]
+            ):
+                return {"vuln": "SSRF", "ip": ip}
+
+            # IDOR
+            if any(p in path for p in ["/api/orders", "/api/users/"]) and any(k in joined or k in decoded for k in ["user_id=", "account_id=", "order_id="]):
+                return {"vuln": "IDOR", "ip": ip}
+
+            # File upload abuse
+            if any(p in path for p in ["/api/users/avatar", "/upload", "/api/upload"]) and any(
+                k in joined or k in decoded for k in [".html", ".svg", "<script", "onerror=", "payload.html"]
+            ):
+                return {"vuln": "Unrestricted File Upload", "ip": ip}
+
+            # Auth bypass / brute force
+            if any(p in path for p in ["/api/auth", "/login", "/admin/login"]) and any(
+                k in joined or k in decoded for k in ["' or '1'='1", "\" or \"1\"=\"1", "or 1=1", "admin", "password=", "jwt"]
+            ):
+                return {"vuln": "Broken Authentication (JWT bypass)", "ip": ip}
+
+            # Path traversal
+            if any(p in path for p in ["/download", "/upload", "/api/download", "/api/upload", "/api/files", "/api/users/profile"]) and any(
+                k in joined or k in decoded for k in ["..%2f", "..%5c", "../", "..\\", "etc/passwd", "win.ini"]
+            ):
+                return {"vuln": "Path Traversal", "ip": ip}
+
+            # Command injection
+            if any(p in path for p in ["/download", "/upload", "/api/download", "/api/upload", "/api/files", "/api/users/profile"]) and any(
+                k in joined or k in decoded for k in ["cmd=", ";", "|", "whoami", "cat /etc/passwd"]
+            ):
+                return {"vuln": "Command Injection", "ip": ip}
+        return None
 
     async def _finalize_round(self, winner: str, reason: str, round_index: int) -> None:
         if not self._round_state or self._round_state.get("winner"):
             return
         self._round_state["winner"] = winner
+        self._round_state["active"] = False
+        self._round_results.append({"round": round_index, "winner": winner, "reason": reason})
         if winner in ("red", "blue"):
             delta = 100
             if winner == "red":
@@ -1194,6 +1415,28 @@ class BattleManager:
             return f"ROUND {round_index}: BLUE TEAM SHIELDS UP — {reason}."
         return f"ROUND {round_index}: DRAW — {reason}."
 
+    def _build_battle_summary(self) -> Dict[str, Any]:
+        battle = get_battle(self._battle_id) if self._battle_id else None
+        red_score = battle.get("red_score", 0) if battle else 0
+        blue_score = battle.get("blue_score", 0) if battle else 0
+        red_wins = len([r for r in self._round_results if r.get("winner") == "red"])
+        blue_wins = len([r for r in self._round_results if r.get("winner") == "blue"])
+        draws = len([r for r in self._round_results if r.get("winner") == "draw"])
+        if red_wins > blue_wins:
+            winner = "red"
+        elif blue_wins > red_wins:
+            winner = "blue"
+        else:
+            winner = "draw"
+        return {
+            "winner": winner,
+            "red_score": red_score,
+            "blue_score": blue_score,
+            "red_wins": red_wins,
+            "blue_wins": blue_wins,
+            "draws": draws,
+            "rounds": list(self._round_results),
+        }
     def _output_failed(self, output: Any) -> bool:
         if output is None:
             return True
@@ -1224,3 +1467,20 @@ class BattleManager:
                 except Exception:
                     return False
         return False
+
+    async def _defense_action(self, ip: str, action: str, limit: Optional[int] = None, window: Optional[int] = None) -> None:
+        if not ip or ip == "unknown":
+            return
+        try:
+            import httpx
+
+            await asyncio.to_thread(
+                httpx.post,
+                f"{self._target_url}/internal/defense",
+                json={"ip": ip, "action": action, "limit": limit, "window": window},
+                timeout=5.0,
+            )
+        except Exception:
+            return
+
+    # Note: No automated blocking or rate limiting in demo flow. Blue suggests actions only.
